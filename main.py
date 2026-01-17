@@ -287,6 +287,30 @@ async def clearhistory(interaction: discord.Interaction):
     await interaction.response.send_message("Autoplay history cleared. Songs can now be recommended again.")
 
 
+@client.tree.command(name="model", description="Change the AI model for /guide command")
+@app_commands.describe(model="The LLM model to use")
+@app_commands.choices(model=[
+    app_commands.Choice(name="OpenAI GPT-5.2", value="openai/gpt-5.2"),
+    app_commands.Choice(name="xAI Grok 4.1 Fast", value="x-ai/grok-4.1-fast"),
+    app_commands.Choice(name="Google Gemini 3 Pro", value="google/gemini-3-pro-preview"),
+    app_commands.Choice(name="Anthropic Claude Sonnet 4.5", value="anthropic/claude-sonnet-4.5"),
+    app_commands.Choice(name="Z-AI GLM 4.7", value="z-ai/glm-4.7"),
+    app_commands.Choice(name="Anthropic Claude Haiku 4.5", value="anthropic/claude-haiku-4.5"),
+])
+async def model(interaction: discord.Interaction, model: app_commands.Choice[str]):
+    """Change the LLM model used by the /guide command."""
+    from settings import set_llm_model, get_llm_model
+
+    if set_llm_model(model.value):
+        await interaction.response.send_message(f"Model changed to **{model.name}**")
+    else:
+        current = get_llm_model()
+        await interaction.response.send_message(
+            f"Invalid model. Current model: **{current}**",
+            ephemeral=True
+        )
+
+
 @client.tree.command(name="guide", description="Get help with video games using AI")
 @app_commands.guild_only()
 @app_commands.describe(question="Your gaming question (tips, strategies, builds, etc.)")
@@ -295,6 +319,7 @@ async def guide(interaction: discord.Interaction, question: str):
     await interaction.response.defer()
 
     guild_id = interaction.guild_id
+    user_id = interaction.user.id
 
     # Create initial embed
     embed = discord.Embed(
@@ -318,7 +343,7 @@ async def guide(interaction: discord.Interaction, question: str):
         full_response = ""
         last_update = time.monotonic()
 
-        async for chunk in agent.ask(guild_id, question):
+        async for chunk in agent.ask(guild_id, user_id, question):
             full_response += chunk
 
             # Update embed at most once per second to avoid rate limits

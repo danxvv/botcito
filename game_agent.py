@@ -10,6 +10,8 @@ from agno.db.sqlite import SqliteDb
 from agno.models.openrouter import OpenRouter
 from agno.tools.mcp import MCPTools
 
+from settings import get_llm_model
+
 # Ensure data directory exists (use absolute path relative to script)
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
@@ -39,12 +41,13 @@ class GameAgent:
         if not os.getenv("OPENROUTER_API_KEY"):
             raise ValueError("OPENROUTER_API_KEY environment variable is required")
 
-    async def ask(self, guild_id: int, question: str) -> AsyncGenerator[str, None]:
+    async def ask(self, guild_id: int, user_id: int, question: str) -> AsyncGenerator[str, None]:
         """
         Ask the agent a gaming question with streaming response.
 
         Args:
-            guild_id: Discord guild ID for per-server memory
+            guild_id: Discord guild ID for session context
+            user_id: Discord user ID for per-user memory isolation
             question: The user's gaming question
 
         Yields:
@@ -61,21 +64,34 @@ class GameAgent:
         # Connect with timeout to avoid hanging
         await asyncio.wait_for(mcp_tools.connect(), timeout=30.0)
 
+        # Use separate IDs for proper isolation:
+        # - user_id: Discord user ID for per-user memory storage
+        # - session_id: Combined guild+user ID for per-user conversation history
+        guild_id_str = str(guild_id)
+        user_id_str = str(user_id)
+        session_id = f"{guild_id}_{user_id}"
+
         try:
             agent = Agent(
                 name="GameGuide",
-                model=OpenRouter(id="google/gemini-3-flash-preview"),
+                description="A veteran gaming expert who has mastered countless games",
+                role="Video game assistant specializing in helping players overcome challenges",
+                add_datetime_to_context=True,
+                model=OpenRouter(id=get_llm_model()),
                 tools=[mcp_tools],
                 db=self.db,
-                enable_user_memories=True,
                 instructions=AGENT_INSTRUCTIONS,
                 markdown=True,
+                enable_user_memories=True,
+                add_history_to_context=True,
+                num_history_runs=5
             )
 
             # Stream the response - arun with stream=True returns an async iterator
             async for event in agent.arun(
                 input=question,
-                user_id=str(guild_id),
+                user_id=user_id_str,      # Per-user memories
+                session_id=session_id,     # Per-user conversation history within guild
                 stream=True,
             ):
                 if hasattr(event, "content") and event.content:
@@ -84,19 +100,20 @@ class GameAgent:
         finally:
             await mcp_tools.close()
 
-    async def ask_simple(self, guild_id: int, question: str) -> str:
+    async def ask_simple(self, guild_id: int, user_id: int, question: str) -> str:
         """
         Ask the agent a gaming question and get full response.
 
         Args:
-            guild_id: Discord guild ID for per-server memory
+            guild_id: Discord guild ID for session context
+            user_id: Discord user ID for per-user memory isolation
             question: The user's gaming question
 
         Returns:
             The complete response string
         """
         chunks = []
-        async for chunk in self.ask(guild_id, question):
+        async for chunk in self.ask(guild_id, user_id, question):
             chunks.append(chunk)
         return "".join(chunks)
 
