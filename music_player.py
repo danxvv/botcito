@@ -1,12 +1,17 @@
-"""Music player with queue management, autoplay, and auto-disconnect."""
+"""Music player with queue management, autoplay, auto-disconnect, and recording."""
 
 import asyncio
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 
 import discord
+from discord.ext import voice_recv
 
 from autoplay import YouTubeMusicHandler
+from voice_recorder import RecordingSession, WavAudioSink, save_recordings, get_recording_stats
 from youtube import SongInfo, extract_song_info
 
 
@@ -25,6 +30,8 @@ class GuildPlayer:
     ytmusic: YouTubeMusicHandler = field(default_factory=YouTubeMusicHandler)
     autoplay_queue: deque[SongInfo] = field(default_factory=deque)  # Pre-fetched autoplay songs
     recent_songs: deque[str] = field(default_factory=deque)  # Recent video IDs for blended recommendations
+    recording_session: RecordingSession | None = None
+    audio_sink: WavAudioSink | None = None
     _disconnect_task: asyncio.Task | None = field(default=None, repr=False)
     _prefetch_task: asyncio.Task | None = field(default=None, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -54,8 +61,8 @@ class MusicPlayerManager:
 
     async def connect(
         self, guild_id: int, channel: discord.VoiceChannel
-    ) -> discord.VoiceClient:
-        """Connect to a voice channel."""
+    ) -> voice_recv.VoiceRecvClient:
+        """Connect to a voice channel using VoiceRecvClient for recording support."""
         player = self.get_player(guild_id)
 
         if player.voice_client and player.voice_client.is_connected():
@@ -63,14 +70,19 @@ class MusicPlayerManager:
                 await player.voice_client.move_to(channel)
             return player.voice_client
 
-        player.voice_client = await channel.connect()
+        player.voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient)
         return player.voice_client
 
-    async def disconnect(self, guild_id: int) -> None:
-        """Disconnect from voice channel and clean up."""
+    async def disconnect(self, guild_id: int) -> dict | None:
+        """Disconnect from voice channel and clean up. Returns recording stats if was recording."""
         player = self.get_player(guild_id)
         self._cancel_disconnect_timer(player)
         await self._cancel_prefetch(player)
+
+        # Save recording if active
+        recording_result = None
+        if player.recording_session and player.audio_sink:
+            recording_result = await self.stop_recording(guild_id)
 
         if player.voice_client:
             if player.voice_client.is_playing():
@@ -83,6 +95,8 @@ class MusicPlayerManager:
         player.recent_songs.clear()
         player.current_song = None
         player.ytmusic.clear_history()
+
+        return recording_result
 
     async def add_to_queue(self, guild_id: int, song: SongInfo) -> int:
         """Add a song to the queue. Returns queue position."""
@@ -328,6 +342,67 @@ class MusicPlayerManager:
             player.voice_client
             and (player.voice_client.is_playing() or player.voice_client.is_paused())
         )
+
+    # ============== Recording Methods ==============
+
+    def is_recording(self, guild_id: int) -> bool:
+        """Check if recording is active for this guild."""
+        player = self.get_player(guild_id)
+        return player.recording_session is not None
+
+    async def start_recording(self, guild_id: int, started_by: int) -> RecordingSession | None:
+        """Start recording voice channel audio. Returns session or None if failed."""
+        player = self.get_player(guild_id)
+
+        if not player.voice_client or not player.voice_client.is_connected():
+            return None
+
+        if player.recording_session:
+            return None  # Already recording
+
+        # Create recording session
+        session_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
+        session = RecordingSession(
+            session_id=session_id,
+            guild_id=guild_id,
+            started_by=started_by,
+        )
+
+        # Create audio sink and start listening
+        sink = WavAudioSink(session)
+        player.voice_client.listen(sink)
+
+        player.recording_session = session
+        player.audio_sink = sink
+
+        return session
+
+    async def stop_recording(self, guild_id: int) -> dict | None:
+        """Stop recording and save files. Returns stats dict or None if not recording."""
+        player = self.get_player(guild_id)
+
+        if not player.recording_session or not player.audio_sink:
+            return None
+
+        # Stop listening
+        if player.voice_client and player.voice_client.is_connected():
+            player.voice_client.stop_listening()
+
+        # Get stats before saving
+        stats = get_recording_stats(player.audio_sink)
+
+        # Save recordings
+        saved_files = save_recordings(player.audio_sink)
+        stats["saved_files"] = {uid: str(path) for uid, path in saved_files.items()}
+        stats["output_dir"] = str(player.recording_session.output_dir)
+        stats["session_id"] = player.recording_session.session_id
+
+        # Cleanup
+        player.audio_sink.cleanup()
+        player.recording_session = None
+        player.audio_sink = None
+
+        return stats
 
 
 # Global player manager instance
