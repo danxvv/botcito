@@ -16,6 +16,13 @@ dependencies = [
     "textual>=7.3.0",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.25.0",
+    "pytest-cov>=6.0.0",
+]
+
 [project.scripts]
 audit = "audit:run_audit"
 
@@ -28,3 +35,26 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["audit*", "game_agent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+]
+
+[tool.coverage.run]
+source = [".", "game_agent", "audit"]
+omit = ["tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
