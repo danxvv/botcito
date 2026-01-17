@@ -9,4 +9,8 @@ dependencies = [
     "yt-dlp>=2025.1.0",
     "ytmusicapi>=1.11.0,<2.0.0",
     "python-dotenv>=1.0.0,<2.0.0",
+    "agno>=2.3.26",
+    "mcp",
+    "sqlalchemy",
+    "openai>=2.15.0",
 ]

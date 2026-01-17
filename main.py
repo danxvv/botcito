@@ -1,7 +1,9 @@
 """Discord Music Bot with slash commands, autoplay, and Opus streaming."""
 
+import asyncio
 import os
 import shutil
+import time
 
 import discord
 from discord import app_commands
@@ -10,6 +12,18 @@ from dotenv import load_dotenv
 from autoplay import YouTubeMusicHandler
 from music_player import player_manager
 from youtube import extract_playlist, extract_song_info, is_playlist_url, search_youtube
+
+# Game agent (lazy loaded to avoid startup errors if keys missing)
+_game_agent = None
+
+
+def get_game_agent():
+    """Get or create the game agent singleton."""
+    global _game_agent
+    if _game_agent is None:
+        from game_agent import GameAgent
+        _game_agent = GameAgent()
+    return _game_agent
 
 load_dotenv()
 
@@ -199,9 +213,10 @@ async def queue(interaction: discord.Interaction):
 
     current = player_manager.get_current_song(guild_id)
     songs = player_manager.get_queue(guild_id)
+    autoplay_songs = player_manager.get_autoplay_queue(guild_id)
     player = player_manager.get_player(guild_id)
 
-    if not current and not songs:
+    if not current and not songs and not autoplay_songs:
         await interaction.response.send_message("Queue is empty.", ephemeral=True)
         return
 
@@ -220,6 +235,12 @@ async def queue(interaction: discord.Interaction):
 
     autoplay_status = "ON" if player.autoplay_enabled else "OFF"
     lines.append(f"\n*Autoplay: {autoplay_status}*")
+
+    # Show autoplay queue if autoplay is enabled and has songs
+    if player.autoplay_enabled and autoplay_songs:
+        lines.append("\n**Autoplay Up Next:**")
+        for i, song in enumerate(autoplay_songs[:5], 1):
+            lines.append(f"  {i}. {song.title} [{format_duration(song.duration)}]")
 
     await interaction.response.send_message("\n".join(lines))
 
@@ -258,6 +279,70 @@ async def autoplay(interaction: discord.Interaction):
     await interaction.response.send_message(f"Autoplay **{status}**.")
 
 
+@client.tree.command(name="clearhistory", description="Clear autoplay history to allow songs to repeat")
+async def clearhistory(interaction: discord.Interaction):
+    """Clear played history so songs can be recommended again."""
+    guild_id = interaction.guild_id
+    player_manager.clear_history(guild_id)
+    await interaction.response.send_message("Autoplay history cleared. Songs can now be recommended again.")
+
+
+@client.tree.command(name="guide", description="Get help with video games using AI")
+@app_commands.guild_only()
+@app_commands.describe(question="Your gaming question (tips, strategies, builds, etc.)")
+async def guide(interaction: discord.Interaction, question: str):
+    """Answer gaming questions using AI with web search."""
+    await interaction.response.defer()
+
+    guild_id = interaction.guild_id
+
+    # Create initial embed
+    embed = discord.Embed(
+        title=question[:256],  # Discord title limit
+        description="Searching for answers...",
+        color=discord.Color.blue(),
+    )
+    embed.set_footer(text="Powered by Agno + Exa")
+
+    message = await interaction.followup.send(embed=embed)
+
+    try:
+        agent = get_game_agent()
+    except ValueError as e:
+        embed.description = f"Configuration error: {e}"
+        embed.color = discord.Color.red()
+        await message.edit(embed=embed)
+        return
+
+    try:
+        full_response = ""
+        last_update = time.monotonic()
+
+        async for chunk in agent.ask(guild_id, question):
+            full_response += chunk
+
+            # Update embed at most once per second to avoid rate limits
+            if time.monotonic() - last_update >= 1.0:
+                embed.description = full_response[:4000]  # Discord embed limit
+                embed.color = discord.Color.gold()
+                await message.edit(embed=embed)
+                last_update = time.monotonic()
+
+        # Final update with complete response
+        embed.description = full_response[:4000] if full_response else "No response generated."
+        embed.color = discord.Color.green()
+        await message.edit(embed=embed)
+
+    except (TimeoutError, asyncio.TimeoutError):
+        embed.description = "Request timed out. Please try again."
+        embed.color = discord.Color.red()
+        await message.edit(embed=embed)
+    except Exception as e:
+        embed.description = f"Error: {str(e)[:500]}"
+        embed.color = discord.Color.red()
+        await message.edit(embed=embed)
+
+
 # ============== Events ==============
 
 
@@ -282,6 +367,9 @@ async def on_voice_state_update(
         player.voice_client = None
         player.current_song = None
         player.queue.clear()
+        player.autoplay_queue.clear()
+        player.recent_songs.clear()
+        player.ytmusic.clear_history()
 
 
 # ============== Dependency Check ==============
