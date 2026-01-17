@@ -5,7 +5,18 @@
       "mcp__plugin_context7_context7__query-docs",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:pypi.org)",
-      "WebFetch(domain:exa.ai)"
+      "WebFetch(domain:exa.ai)",
+      "Bash(ls:*)",
+      "Bash(dir:*)",
+      "Bash(powershell -Command \"Get-ChildItem -Path ''C:\\\\Users\\\\darko\\\\discordbotcito\\\\*.py'' -Name\")",
+      "Bash(powershell -Command \"New-Item -ItemType Directory -Force -Path ''C:\\\\Users\\\\darko\\\\discordbotcito\\\\game_agent''\")",
+      "Bash(powershell -Command \"python -c \"\"from game_agent import GameAgent; print\\(''Import successful''\\)\"\"\")",
+      "Bash(powershell -Command \"uv run python -c \"\"from game_agent import GameAgent; print\\(''Import successful''\\)\"\"\")",
+      "Bash(powershell -Command \"uv run python -c \"\"from game_agent import GameAgent, AGENT_INSTRUCTIONS; print\\(''Backward compatible import successful''\\); print\\(f''Agent instructions length: {len\\(AGENT_INSTRUCTIONS\\)} chars''\\)\"\"\")",
+      "Bash(python -m py_compile:*)",
+      "Bash(python:*)",
+      "Bash(uv run python:*)",
+      "WebSearch"
     ]
   }
 }

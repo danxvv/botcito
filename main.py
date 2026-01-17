@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from autoplay import YouTubeMusicHandler
 from music_player import player_manager
 from youtube import extract_playlist, extract_song_info, is_playlist_url, search_youtube
+from audit.logger import log_command, AuditLogger
 
 # Game agent (lazy loaded to avoid startup errors if keys missing)
 _game_agent = None
@@ -80,6 +81,7 @@ async def ensure_voice(interaction: discord.Interaction) -> bool:
 
 @client.tree.command(name="play", description="Play a song (search or URL)")
 @app_commands.describe(query="Song name or YouTube URL")
+@log_command
 async def play(interaction: discord.Interaction, query: str):
     """Play a song from YouTube."""
     if not await ensure_voice(interaction):
@@ -130,6 +132,20 @@ async def play(interaction: discord.Interaction, query: str):
     # Add to queue
     position = await player_manager.add_to_queue(guild_id, song)
 
+    # Log music event
+    guild_name = interaction.guild.name if interaction.guild else "DM"
+    AuditLogger.log_music(
+        guild_id,
+        guild_name,
+        interaction.user.id,
+        str(interaction.user),
+        song.video_id,
+        song.title,
+        song.duration,
+        "search" if not query.startswith("http") else "url",
+        "play",
+    )
+
     # Start playing if not already
     if not player_manager.is_playing(guild_id):
         await player_manager.play_next(guild_id)
@@ -166,25 +182,44 @@ async def play_autocomplete(
 
 
 @client.tree.command(name="skip", description="Skip the current song")
+@log_command
 async def skip(interaction: discord.Interaction):
     """Skip the current song."""
     guild_id = interaction.guild_id
+    current = player_manager.get_current_song(guild_id)
 
     if player_manager.skip(guild_id):
+        if current:
+            guild_name = interaction.guild.name if interaction.guild else "DM"
+            AuditLogger.log_music(
+                guild_id, guild_name, interaction.user.id, str(interaction.user),
+                current.video_id, current.title, current.duration, "queue", "skip"
+            )
         await interaction.response.send_message("Skipped!")
     else:
         await interaction.response.send_message("Nothing is playing.", ephemeral=True)
 
 
 @client.tree.command(name="stop", description="Stop playback and clear queue")
+@log_command
 async def stop(interaction: discord.Interaction):
     """Stop playback and disconnect."""
     guild_id = interaction.guild_id
+    current = player_manager.get_current_song(guild_id)
+
+    if current:
+        guild_name = interaction.guild.name if interaction.guild else "DM"
+        AuditLogger.log_music(
+            guild_id, guild_name, interaction.user.id, str(interaction.user),
+            current.video_id, current.title, current.duration, "queue", "stop"
+        )
+
     await player_manager.disconnect(guild_id)
     await interaction.response.send_message("Stopped and disconnected.")
 
 
 @client.tree.command(name="pause", description="Pause the current song")
+@log_command
 async def pause(interaction: discord.Interaction):
     """Pause the current song."""
     guild_id = interaction.guild_id
@@ -196,6 +231,7 @@ async def pause(interaction: discord.Interaction):
 
 
 @client.tree.command(name="resume", description="Resume playback")
+@log_command
 async def resume(interaction: discord.Interaction):
     """Resume paused playback."""
     guild_id = interaction.guild_id
@@ -207,6 +243,7 @@ async def resume(interaction: discord.Interaction):
 
 
 @client.tree.command(name="queue", description="Show the current queue")
+@log_command
 async def queue(interaction: discord.Interaction):
     """Show the current queue."""
     guild_id = interaction.guild_id
@@ -246,6 +283,7 @@ async def queue(interaction: discord.Interaction):
 
 
 @client.tree.command(name="nowplaying", description="Show the currently playing song")
+@log_command
 async def nowplaying(interaction: discord.Interaction):
     """Show the currently playing song."""
     guild_id = interaction.guild_id
@@ -270,6 +308,7 @@ async def nowplaying(interaction: discord.Interaction):
 
 
 @client.tree.command(name="autoplay", description="Toggle autoplay mode")
+@log_command
 async def autoplay(interaction: discord.Interaction):
     """Toggle autoplay mode on/off."""
     guild_id = interaction.guild_id
@@ -280,6 +319,7 @@ async def autoplay(interaction: discord.Interaction):
 
 
 @client.tree.command(name="clearhistory", description="Clear autoplay history to allow songs to repeat")
+@log_command
 async def clearhistory(interaction: discord.Interaction):
     """Clear played history so songs can be recommended again."""
     guild_id = interaction.guild_id
@@ -294,9 +334,10 @@ async def clearhistory(interaction: discord.Interaction):
     app_commands.Choice(name="xAI Grok 4.1 Fast", value="x-ai/grok-4.1-fast"),
     app_commands.Choice(name="Google Gemini 3 Pro", value="google/gemini-3-pro-preview"),
     app_commands.Choice(name="Anthropic Claude Sonnet 4.5", value="anthropic/claude-sonnet-4.5"),
-    app_commands.Choice(name="Z-AI GLM 4.7", value="z-ai/glm-4.7"),
     app_commands.Choice(name="Anthropic Claude Haiku 4.5", value="anthropic/claude-haiku-4.5"),
+    app_commands.Choice(name="Google Gemini 3 Flash", value="google/gemini-3-flash-preview"),
 ])
+@log_command
 async def model(interaction: discord.Interaction, model: app_commands.Choice[str]):
     """Change the LLM model used by the /guide command."""
     from settings import set_llm_model, get_llm_model
@@ -314,6 +355,7 @@ async def model(interaction: discord.Interaction, model: app_commands.Choice[str
 @client.tree.command(name="guide", description="Get help with video games using AI")
 @app_commands.guild_only()
 @app_commands.describe(question="Your gaming question (tips, strategies, builds, etc.)")
+@log_command
 async def guide(interaction: discord.Interaction, question: str):
     """Answer gaming questions using AI with web search."""
     await interaction.response.defer()
@@ -340,20 +382,21 @@ async def guide(interaction: discord.Interaction, question: str):
         return
 
     try:
-        full_response = ""
+        response_chunks: list[str] = []
         last_update = time.monotonic()
 
         async for chunk in agent.ask(guild_id, user_id, question):
-            full_response += chunk
+            response_chunks.append(chunk)
 
             # Update embed at most once per second to avoid rate limits
             if time.monotonic() - last_update >= 1.0:
-                embed.description = full_response[:4000]  # Discord embed limit
+                embed.description = "".join(response_chunks)[:4000]  # Discord embed limit
                 embed.color = discord.Color.gold()
                 await message.edit(embed=embed)
                 last_update = time.monotonic()
 
         # Final update with complete response
+        full_response = "".join(response_chunks)
         embed.description = full_response[:4000] if full_response else "No response generated."
         embed.color = discord.Color.green()
         await message.edit(embed=embed)
@@ -389,12 +432,14 @@ async def on_voice_state_update(
     if member.id == client.user.id and after.channel is None and before.channel:
         guild_id = before.channel.guild.id
         player = player_manager.get_player(guild_id)
-        player.voice_client = None
-        player.current_song = None
-        player.queue.clear()
-        player.autoplay_queue.clear()
-        player.recent_songs.clear()
-        player.ytmusic.clear_history()
+        # Acquire lock to avoid race conditions with play_next()
+        async with player._lock:
+            player.voice_client = None
+            player.current_song = None
+            player.queue.clear()
+            player.autoplay_queue.clear()
+            player.recent_songs.clear()
+            player.ytmusic.clear_history()
 
 
 # ============== Dependency Check ==============
