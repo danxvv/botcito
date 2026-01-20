@@ -11,12 +11,15 @@ from settings import get_llm_model
 from .config import (
     BUILD_AGENT_CONFIG,
     LORE_AGENT_CONFIG,
+    MAX_TOOL_CALLS_FROM_HISTORY,
     NUM_HISTORY_RUNS,
     SPEEDRUN_AGENT_CONFIG,
     STRATEGY_AGENT_CONFIG,
     TEAM_DESCRIPTION,
     TEAM_INSTRUCTIONS,
+    TEAM_LEADER_MODEL,
     TEAM_NAME,
+    TEAM_ROLE,
     VOICE_AGENT_CONFIG,
 )
 
@@ -36,6 +39,7 @@ def _create_specialist_agent(
         tools=[mcp_tools],
         markdown=True,
         add_name_to_context=True,
+        add_datetime_to_context=True,
     )
 
 
@@ -58,6 +62,8 @@ def create_game_team(db: SqliteDb, mcp_tools: MCPTools) -> Team:
 
     The team uses route mode (respond_directly=True) where the team leader
     analyzes the question and delegates to the most appropriate specialist.
+    Uses passthrough mode (determine_input_for_members=False) so the specialist
+    receives the original question directly without leader synthesis.
 
     Args:
         db: SQLite database for team memory storage
@@ -82,20 +88,26 @@ def create_game_team(db: SqliteDb, mcp_tools: MCPTools) -> Team:
         SPEEDRUN_AGENT_CONFIG, mcp_tools, model_id
     )
 
-    # Create the team with route mode
+    # Create the team with route mode and passthrough
+    # Team leader uses Claude Sonnet for better routing decisions
     return Team(
         name=TEAM_NAME,
+        role=TEAM_ROLE,
         description=TEAM_DESCRIPTION,
-        model=OpenRouter(id=model_id),
+        model=OpenRouter(id=TEAM_LEADER_MODEL),
         members=[strategy_agent, build_agent, lore_agent, speedrun_agent],
         instructions=TEAM_INSTRUCTIONS,
         db=db,
         markdown=True,
         respond_directly=True,  # Route mode - leader picks one agent
-        show_members_responses=False,  # Only show final response
-        enable_agentic_context=True,
+        determine_input_for_members=False,  # Passthrough - member gets original input
+        show_members_responses=True,  # Show specialist response directly
+        enable_agentic_state=True,
+        add_name_to_context=True,
         add_datetime_to_context=True,
+        add_history_to_context=True,  # Include conversation history
         num_history_runs=NUM_HISTORY_RUNS,
+        max_tool_calls_from_history=MAX_TOOL_CALLS_FROM_HISTORY,
     )
 
 

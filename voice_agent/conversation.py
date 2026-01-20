@@ -197,11 +197,15 @@ class VoiceConversation:
 
                 # Generate and play speech if TTS is available
                 if state.tts.is_available:
+                    # Clean text for speech (remove markdown formatting)
+                    clean_text = await self.game_agent.clean_text_for_speech(response_text)
+                    print(f"[Voice] Cleaned text: {clean_text[:100]}...")
+
                     # Run blocking TTS in executor to avoid blocking event loop
                     loop = asyncio.get_running_loop()
                     audio_path = await loop.run_in_executor(
                         None,
-                        lambda: state.tts.generate_speech(response_text)
+                        lambda: state.tts.generate_speech(clean_text)
                     )
                     print(f"[Voice] Generated speech: {audio_path}")
                     await self._play_response(guild_id, audio_path, state)
@@ -267,11 +271,14 @@ class VoiceConversation:
         if not player.voice_client or not player.voice_client.is_connected():
             return False
 
+        # Clean text for speech (remove markdown formatting)
+        clean_text = await self.game_agent.clean_text_for_speech(text)
+
         # Run blocking TTS in executor to avoid blocking event loop
         loop = asyncio.get_running_loop()
         audio_path = await loop.run_in_executor(
             None,
-            lambda: self.tts_provider.generate_speech(text, language=language)
+            lambda: self.tts_provider.generate_speech(clean_text, language=language)
         )
 
         # Get state if available (for tracking speaking status and locking)

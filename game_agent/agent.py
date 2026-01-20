@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from typing import AsyncGenerator
 
 from agno.agent import Agent
@@ -237,6 +238,68 @@ Decide if this response should be spoken aloud."""
             reason = "No reason provided"
 
         return should_speak, reason
+
+    def _strip_tool_outputs(self, text: str) -> str:
+        """
+        Strip MCP tool debug outputs from text.
+
+        Removes patterns like:
+        - "web_search_exa(query=...) completed in 5.2842s"
+        - "crawling(url=...) completed in 2.1s"
+
+        Args:
+            text: Text that may contain tool debug outputs
+
+        Returns:
+            Text with tool outputs removed
+        """
+        # Pattern matches: tool_name(params) completed in X.XXXs
+        pattern = r'\w+\([^)]*\)\s+completed\s+in\s+[\d.]+s\.?\s*'
+        return re.sub(pattern, '', text)
+
+    async def clean_text_for_speech(self, text: str) -> str:
+        """
+        Clean text for TTS by removing markdown formatting and tool outputs.
+
+        First strips MCP tool debug outputs, then uses an LLM to remove
+        all formatting (headers, bold, italic, lists, code blocks, etc.)
+        while preserving the actual content and punctuation.
+
+        Args:
+            text: Raw text that may contain markdown formatting
+
+        Returns:
+            Plain text suitable for speech synthesis
+        """
+        if not text or not text.strip():
+            return text
+
+        # First strip tool debug outputs
+        text = self._strip_tool_outputs(text)
+
+        if not text.strip():
+            return text
+
+        cleaning_agent = Agent(
+            model=OpenRouter(id=get_llm_model(), api_key=self.api_keys.openrouter_api_key),
+            instructions=(
+                "You are a text cleaner. Remove ALL markdown formatting from the input text. "
+                "Remove: headers (#), bold (**), italic (*), code blocks (```), inline code (`), "
+                "bullet points (- or *), numbered lists, links, and any other formatting. "
+                "Keep only the plain text content and punctuation. "
+                "Do not add any commentary, just output the cleaned text."
+            ),
+        )
+
+        chunks = []
+        async for event in cleaning_agent.arun(
+            input=f"Clean this text for speech:\n\n{text}",
+            stream=True,
+        ):
+            if hasattr(event, "content") and event.content:
+                chunks.append(event.content)
+
+        return "".join(chunks).strip()
 
     async def transcribe_audio(
         self, audio_data: bytes, audio_format: str = "wav"

@@ -611,7 +611,7 @@ async def model(interaction: discord.Interaction, model: app_commands.Choice[str
 @app_commands.guild_only()
 @app_commands.describe(
     question="Your gaming question (tips, strategies, builds, etc.)",
-    voice="Voice output: True=force on, False=force off, unset=AI decides"
+    voice="Enable voice output (default: off)"
 )
 @log_command
 async def guide(interaction: discord.Interaction, question: str, voice: bool | None = None):
@@ -651,23 +651,8 @@ async def guide(interaction: discord.Interaction, question: str, voice: bool | N
         await message.edit(embed=embed)
         return
 
-    # Determine voice output setting
-    should_speak = False
-    voice_reason = ""
-
-    if voice is not None:
-        # User explicitly set voice preference
-        should_speak = voice
-        voice_reason = "User override"
-    elif user_in_voice:
-        # AI decides based on context
-        try:
-            should_speak, voice_reason = await agent.should_speak(question, user_in_voice)
-            print(f"[Guide] Voice decision: {should_speak} - {voice_reason}")
-        except Exception as e:
-            print(f"[Guide] Voice decision error: {e}")
-            should_speak = False
-            voice_reason = "Decision error"
+    # Voice output only if explicitly enabled
+    should_speak = voice is True
 
     try:
         response_chunks: list[str] = []
