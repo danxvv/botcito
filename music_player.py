@@ -5,7 +5,6 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 
 import discord
 from discord.ext import voice_recv
@@ -32,6 +31,7 @@ class GuildPlayer:
     recent_songs: deque[str] = field(default_factory=deque)  # Recent video IDs for blended recommendations
     recording_session: RecordingSession | None = None
     audio_sink: WavAudioSink | None = None
+    volume: float = 1.0  # Volume level (0.0 to 1.0)
     _disconnect_task: asyncio.Task | None = field(default=None, repr=False)
     _prefetch_task: asyncio.Task | None = field(default=None, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -45,6 +45,15 @@ FFMPEG_OPTIONS = "-vn"
 
 # Auto-disconnect timeout in seconds
 DISCONNECT_TIMEOUT = 300  # 5 minutes
+
+# Number of autoplay songs to keep pre-fetched
+AUTOPLAY_PREFETCH_COUNT = 3
+
+
+def _cancel_task(task: asyncio.Task | None) -> None:
+    """Cancel a task if it exists and is not done."""
+    if task and not task.done():
+        task.cancel()
 
 
 class MusicPlayerManager:
@@ -148,11 +157,13 @@ class MusicPlayerManager:
                 while len(player.recent_songs) > RECENT_SONGS_LIMIT:
                     player.recent_songs.popleft()
 
-            source = discord.FFmpegOpusAudio(
+            # Use FFmpegPCMAudio + PCMVolumeTransformer for volume control
+            source = discord.FFmpegPCMAudio(
                 song.url,
                 before_options=FFMPEG_BEFORE_OPTIONS,
                 options=FFMPEG_OPTIONS,
             )
+            source = discord.PCMVolumeTransformer(source, volume=player.volume)
 
             def after_callback(error):
                 if error:
@@ -164,13 +175,7 @@ class MusicPlayerManager:
                         player.voice_client.loop,
                     )
 
-            player.voice_client.play(
-                source,
-                after=after_callback,
-                application="audio",
-                bitrate=128,
-                signal_type="music",
-            )
+            player.voice_client.play(source, after=after_callback)
 
             # Pre-fetch autoplay songs in background if autoplay is enabled
             if player.autoplay_enabled:
@@ -198,20 +203,17 @@ class MusicPlayerManager:
         # Don't start if already prefetching or have enough songs
         if player._prefetch_task and not player._prefetch_task.done():
             return
-        if len(player.autoplay_queue) >= 3:
+        if len(player.autoplay_queue) >= AUTOPLAY_PREFETCH_COUNT:
             return
 
-        async def prefetch():
-            await self._prefetch_autoplay(guild_id, player, count=3)
-
         if player.voice_client and player.voice_client.loop:
-            loop = player.voice_client.loop
-            player._prefetch_task = loop.create_task(prefetch())
+            coro = self._prefetch_autoplay(guild_id, player, count=AUTOPLAY_PREFETCH_COUNT)
+            player._prefetch_task = player.voice_client.loop.create_task(coro)
 
     async def _cancel_prefetch(self, player: GuildPlayer) -> None:
         """Cancel any running prefetch task."""
+        _cancel_task(player._prefetch_task)
         if player._prefetch_task:
-            player._prefetch_task.cancel()
             try:
                 await player._prefetch_task
             except asyncio.CancelledError:
@@ -240,7 +242,7 @@ class MusicPlayerManager:
         return all_recs[:limit]
 
     async def _prefetch_autoplay(
-        self, guild_id: int, player: GuildPlayer, count: int = 3
+        self, guild_id: int, player: GuildPlayer, count: int = AUTOPLAY_PREFETCH_COUNT
     ) -> None:
         """Pre-fetch autoplay songs into the autoplay queue."""
         if not player.recent_songs:
@@ -268,20 +270,20 @@ class MusicPlayerManager:
 
     def _start_disconnect_timer(self, guild_id: int, player: GuildPlayer) -> None:
         """Start the auto-disconnect timer."""
-        self._cancel_disconnect_timer(player)
-
-        async def disconnect_after_timeout():
-            await asyncio.sleep(DISCONNECT_TIMEOUT)
-            await self.disconnect(guild_id)
+        _cancel_task(player._disconnect_task)
+        player._disconnect_task = None
 
         if player.voice_client:
+            async def disconnect_after_timeout():
+                await asyncio.sleep(DISCONNECT_TIMEOUT)
+                await self.disconnect(guild_id)
+
             player._disconnect_task = asyncio.create_task(disconnect_after_timeout())
 
     def _cancel_disconnect_timer(self, player: GuildPlayer) -> None:
         """Cancel the auto-disconnect timer."""
-        if player._disconnect_task:
-            player._disconnect_task.cancel()
-            player._disconnect_task = None
+        _cancel_task(player._disconnect_task)
+        player._disconnect_task = None
 
     def skip(self, guild_id: int) -> bool:
         """Skip the current song. Returns True if something was playing."""
@@ -403,6 +405,77 @@ class MusicPlayerManager:
         player.audio_sink = None
 
         return stats
+
+    # ============== Volume and TTS Playback Methods ==============
+
+    def set_volume(self, guild_id: int, volume: float) -> None:
+        """
+        Set playback volume for a guild.
+
+        Args:
+            guild_id: Discord guild ID
+            volume: Volume level (0.0 to 1.0)
+        """
+        player = self.get_player(guild_id)
+        player.volume = max(0.0, min(1.0, volume))
+
+        # Apply to current source if playing
+        if player.voice_client and player.voice_client.source:
+            # PCMVolumeTransformer wraps the source
+            if hasattr(player.voice_client.source, "volume"):
+                player.voice_client.source.volume = player.volume
+
+    def get_volume(self, guild_id: int) -> float:
+        """Get current volume for a guild."""
+        player = self.get_player(guild_id)
+        return player.volume
+
+    async def play_audio_file(self, guild_id: int, file_path: str) -> bool:
+        """
+        Play a local audio file (used for TTS). Waits for playback to complete.
+
+        Args:
+            guild_id: Discord guild ID
+            file_path: Path to audio file (MP3 or WAV)
+
+        Returns:
+            True if playback completed successfully
+        """
+        player = self.get_player(guild_id)
+
+        if not player.voice_client or not player.voice_client.is_connected():
+            return False
+
+        # Wait for current audio to finish if playing (outside lock to avoid blocking)
+        while player.voice_client and player.voice_client.is_playing():
+            await asyncio.sleep(0.1)
+
+        # Create event to signal when playback is done
+        playback_done = asyncio.Event()
+
+        def after_callback(error):
+            if error:
+                print(f"TTS playback error: {error}")
+            # Signal that playback is complete
+            if player.voice_client and player.voice_client.loop:
+                player.voice_client.loop.call_soon_threadsafe(playback_done.set)
+
+        # Use lock briefly only for starting playback to prevent race with play_next
+        async with player._lock:
+            if not player.voice_client or not player.voice_client.is_connected():
+                return False
+
+            # Create audio source from file
+            source = discord.FFmpegPCMAudio(file_path)
+            # Wrap with volume transformer
+            source = discord.PCMVolumeTransformer(source, volume=player.volume)
+
+            # Play the audio
+            player.voice_client.play(source, after=after_callback)
+
+        # Wait for playback to complete (outside lock to allow other operations)
+        await playback_done.wait()
+        return True
 
 
 # Global player manager instance

@@ -14,18 +14,6 @@ from music_player import player_manager
 from youtube import extract_playlist, extract_song_info, is_playlist_url, search_youtube
 from audit.logger import log_command, AuditLogger
 
-# Game agent (lazy loaded to avoid startup errors if keys missing)
-_game_agent = None
-
-
-def get_game_agent():
-    """Get or create the game agent singleton."""
-    global _game_agent
-    if _game_agent is None:
-        from game_agent import GameAgent
-        _game_agent = GameAgent()
-    return _game_agent
-
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -42,11 +30,41 @@ class MusicBot(discord.Client):
         intents.voice_states = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
+        self._game_agent = None
+        self._voice_conversation = None
 
     async def setup_hook(self):
         """Sync commands on startup."""
         await self.tree.sync()
         print(f"Synced {len(self.tree.get_commands())} commands")
+
+    def get_game_agent(self):
+        """Get or create the game agent singleton."""
+        if self._game_agent is None:
+            from game_agent import GameAgent
+
+            self._game_agent = GameAgent()
+        return self._game_agent
+
+    def get_voice_conversation(self):
+        """Get or create the voice conversation manager singleton."""
+        if self._voice_conversation is None:
+            from voice_agent import (
+                ChatterboxTTSProvider,
+                VoiceConversation,
+                get_tts_config,
+            )
+
+            agent = self.get_game_agent()
+            mcp_url, language = get_tts_config()
+            tts_provider = ChatterboxTTSProvider(mcp_url=mcp_url, default_language=language)
+
+            self._voice_conversation = VoiceConversation(
+                game_agent=agent,
+                player_manager=player_manager,
+                tts_provider=tts_provider,
+            )
+        return self._voice_conversation
 
 
 client = MusicBot()
@@ -74,6 +92,34 @@ async def ensure_voice(interaction: discord.Interaction) -> bool:
         )
         return False
     return True
+
+
+def get_tts_error_message(error: Exception) -> str:
+    """Get a user-friendly error message for TTS exceptions."""
+    from voice_agent import TTSConnectionError, TTSGenerationError
+
+    if isinstance(error, TTSConnectionError):
+        return "TTS server not available. Make sure Chatterbox TTS is running."
+    if isinstance(error, TTSGenerationError):
+        return f"Failed to generate speech: {error}"
+    if isinstance(error, NotImplementedError):
+        return "TTS provider not configured."
+    if isinstance(error, ValueError):
+        return f"Error: {error}"
+    return f"Error generating speech: {error}"
+
+
+def get_tts_footer_status(error: Exception) -> str:
+    """Get a short TTS error status for embed footers."""
+    from voice_agent import TTSConnectionError, TTSGenerationError
+
+    if isinstance(error, TTSConnectionError):
+        return "TTS server unavailable"
+    if isinstance(error, TTSGenerationError):
+        return f"TTS error: {str(error)[:50]}"
+    if isinstance(error, NotImplementedError):
+        return "TTS not configured"
+    return f"Voice error: {str(error)[:50]}"
 
 
 # ============== Slash Commands ==============
@@ -408,6 +454,134 @@ async def stoprecord(interaction: discord.Interaction):
     await interaction.followup.send("\n".join(lines))
 
 
+@client.tree.command(name="talk", description="Start voice conversation mode - bot listens and responds")
+@log_command
+async def talk(interaction: discord.Interaction):
+    """Start voice conversation mode."""
+    if not await ensure_voice(interaction):
+        return
+
+    guild_id = interaction.guild_id
+
+    try:
+        voice_conv = client.get_voice_conversation()
+    except ValueError as e:
+        await interaction.response.send_message(
+            f"Configuration error: {e}", ephemeral=True
+        )
+        return
+
+    # Check if already in talk mode
+    if voice_conv.is_active(guild_id):
+        await interaction.response.send_message(
+            "Already in voice conversation mode! Use `/stoptalk` to stop.",
+            ephemeral=True,
+        )
+        return
+
+    # Connect to voice channel if not already connected
+    channel = interaction.user.voice.channel
+    voice_client = await player_manager.connect(guild_id, channel)
+
+    # Start voice conversation
+    try:
+        await voice_conv.start(guild_id, voice_client)
+        tts_status = "" if voice_conv.tts_available else "\n*Note: TTS not configured - responses will be logged to console only.*"
+        await interaction.response.send_message(
+            "Voice conversation started! I'm now listening. "
+            "Speak naturally and I'll respond after you pause.\n"
+            f"Use `/stoptalk` to end the conversation.{tts_status}"
+        )
+    except ValueError as e:
+        await interaction.response.send_message(
+            f"Failed to start voice conversation: {e}", ephemeral=True
+        )
+
+
+@client.tree.command(name="stoptalk", description="Stop voice conversation mode")
+@log_command
+async def stoptalk(interaction: discord.Interaction):
+    """Stop voice conversation mode."""
+    guild_id = interaction.guild_id
+
+    try:
+        voice_conv = client.get_voice_conversation()
+    except ValueError as e:
+        await interaction.response.send_message(
+            f"Configuration error: {e}", ephemeral=True
+        )
+        return
+
+    if not voice_conv.is_active(guild_id):
+        await interaction.response.send_message(
+            "Not in voice conversation mode. Use `/talk` to start.",
+            ephemeral=True,
+        )
+        return
+
+    voice_conv.stop(guild_id)
+    await interaction.response.send_message("Voice conversation ended.")
+
+
+@client.tree.command(name="speak", description="Make the bot speak text aloud")
+@app_commands.describe(text="The text for the bot to speak", language="Language for TTS")
+@app_commands.choices(language=[
+    app_commands.Choice(name="Spanish", value="es"),
+    app_commands.Choice(name="English", value="en"),
+    app_commands.Choice(name="French", value="fr"),
+    app_commands.Choice(name="German", value="de"),
+    app_commands.Choice(name="Italian", value="it"),
+    app_commands.Choice(name="Portuguese", value="pt"),
+    app_commands.Choice(name="Polish", value="pl"),
+    app_commands.Choice(name="Turkish", value="tr"),
+    app_commands.Choice(name="Russian", value="ru"),
+    app_commands.Choice(name="Dutch", value="nl"),
+    app_commands.Choice(name="Czech", value="cs"),
+    app_commands.Choice(name="Arabic", value="ar"),
+    app_commands.Choice(name="Chinese", value="zh"),
+    app_commands.Choice(name="Japanese", value="ja"),
+    app_commands.Choice(name="Hungarian", value="hu"),
+    app_commands.Choice(name="Korean", value="ko"),
+])
+@log_command
+async def speak(
+    interaction: discord.Interaction,
+    text: str,
+    language: app_commands.Choice[str] | None = None,
+):
+    """Make the bot speak text using TTS."""
+    if not await ensure_voice(interaction):
+        return
+
+    guild_id = interaction.guild_id
+    await interaction.response.defer()
+
+    try:
+        voice_conv = client.get_voice_conversation()
+    except ValueError as e:
+        await interaction.followup.send(f"Configuration error: {e}")
+        return
+
+    # Connect to voice channel if not already connected
+    channel = interaction.user.voice.channel
+    await player_manager.connect(guild_id, channel)
+
+    # Get language value if provided
+    lang = language.value if language else None
+
+    # Speak the text
+    try:
+        success = await voice_conv.speak_text(guild_id, text, language=lang)
+        if success:
+            lang_display = f" ({language.name})" if language else ""
+            truncated = f"{text[:100]}..." if len(text) > 100 else text
+            await interaction.followup.send(f"Speaking{lang_display}: *{truncated}*")
+        else:
+            await interaction.followup.send("Failed to speak. Bot may not be in a voice channel.")
+    except Exception as e:
+        await interaction.followup.send(get_tts_error_message(e))
+
+
 @client.tree.command(name="model", description="Change the AI model for /guide command")
 @app_commands.describe(model="The LLM model to use")
 @app_commands.choices(model=[
@@ -435,10 +609,25 @@ async def model(interaction: discord.Interaction, model: app_commands.Choice[str
 
 @client.tree.command(name="guide", description="Get help with video games using AI")
 @app_commands.guild_only()
-@app_commands.describe(question="Your gaming question (tips, strategies, builds, etc.)")
+@app_commands.describe(
+    question="Your gaming question (tips, strategies, builds, etc.)",
+    voice="Voice output: True=force on, False=force off, unset=AI decides"
+)
 @log_command
-async def guide(interaction: discord.Interaction, question: str):
+async def guide(interaction: discord.Interaction, question: str, voice: bool | None = None):
     """Answer gaming questions using AI with web search."""
+    # Check if user is in voice channel
+    user_in_voice = interaction.user.voice is not None
+    voice_channel = interaction.user.voice.channel if user_in_voice else None
+
+    # Handle explicit voice=True when not in voice channel
+    if voice is True and not user_in_voice:
+        await interaction.response.send_message(
+            "You need to be in a voice channel to use voice output!",
+            ephemeral=True,
+        )
+        return
+
     await interaction.response.defer()
 
     guild_id = interaction.guild_id
@@ -450,17 +639,35 @@ async def guide(interaction: discord.Interaction, question: str):
         description="Searching for answers...",
         color=discord.Color.blue(),
     )
-    embed.set_footer(text="Powered by Agno + Exa")
+    embed.set_footer(text="Powered by GameGuide Team")
 
     message = await interaction.followup.send(embed=embed)
 
     try:
-        agent = get_game_agent()
+        agent = client.get_game_agent()
     except ValueError as e:
         embed.description = f"Configuration error: {e}"
         embed.color = discord.Color.red()
         await message.edit(embed=embed)
         return
+
+    # Determine voice output setting
+    should_speak = False
+    voice_reason = ""
+
+    if voice is not None:
+        # User explicitly set voice preference
+        should_speak = voice
+        voice_reason = "User override"
+    elif user_in_voice:
+        # AI decides based on context
+        try:
+            should_speak, voice_reason = await agent.should_speak(question, user_in_voice)
+            print(f"[Guide] Voice decision: {should_speak} - {voice_reason}")
+        except Exception as e:
+            print(f"[Guide] Voice decision error: {e}")
+            should_speak = False
+            voice_reason = "Decision error"
 
     try:
         response_chunks: list[str] = []
@@ -482,6 +689,10 @@ async def guide(interaction: discord.Interaction, question: str):
         embed.color = discord.Color.green()
         await message.edit(embed=embed)
 
+        # Speak response if voice output is enabled
+        if should_speak and full_response.strip():
+            await _speak_guide_response(interaction, voice_channel, full_response, embed, message)
+
     except (TimeoutError, asyncio.TimeoutError):
         embed.description = "Request timed out. Please try again."
         embed.color = discord.Color.red()
@@ -490,6 +701,48 @@ async def guide(interaction: discord.Interaction, question: str):
         embed.description = f"Error: {str(e)[:500]}"
         embed.color = discord.Color.red()
         await message.edit(embed=embed)
+
+
+async def _speak_guide_response(
+    interaction: discord.Interaction,
+    voice_channel,
+    full_response: str,
+    embed: discord.Embed,
+    message,
+):
+    """Speak the guide response via TTS."""
+    guild_id = interaction.guild_id
+    tts_text = _truncate_for_tts(full_response)
+
+    try:
+        await player_manager.connect(guild_id, voice_channel)
+        voice_conv = client.get_voice_conversation()
+
+        embed.set_footer(text="Powered by Agno + Exa | Speaking...")
+        await message.edit(embed=embed)
+
+        await voice_conv.speak_text(guild_id, tts_text)
+
+        embed.set_footer(text="Powered by Agno + Exa | Spoken")
+        await message.edit(embed=embed)
+    except Exception as e:
+        status = get_tts_footer_status(e)
+        embed.set_footer(text=f"Powered by Agno + Exa | {status}")
+        await message.edit(embed=embed)
+
+
+def _truncate_for_tts(text: str, max_chars: int = 2000) -> str:
+    """Truncate text for TTS at a sentence boundary."""
+    if len(text) <= max_chars:
+        return text
+
+    truncate_at = max_chars
+    for punct in [". ", "! ", "? ", "\n"]:
+        last_pos = text[:max_chars].rfind(punct)
+        if last_pos > max_chars // 2:
+            truncate_at = last_pos + 1
+            break
+    return text[:truncate_at].strip()
 
 
 # ============== Events ==============
@@ -513,6 +766,10 @@ async def on_voice_state_update(
     if member.id == client.user.id and after.channel is None and before.channel:
         guild_id = before.channel.guild.id
         player = player_manager.get_player(guild_id)
+
+        # Stop voice conversation if active
+        if client._voice_conversation and client._voice_conversation.is_active(guild_id):
+            client._voice_conversation.stop(guild_id)
 
         # Save recording if active before cleanup
         if player.recording_session and player.audio_sink:
