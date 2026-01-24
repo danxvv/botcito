@@ -1,6 +1,8 @@
 """Music player with queue management, autoplay, auto-disconnect, and recording."""
 
 import asyncio
+import random
+import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -10,6 +12,7 @@ import discord
 from discord.ext import voice_recv
 
 from autoplay import YouTubeMusicHandler
+from ratings import get_guild_ratings
 from voice_recorder import RecordingSession, WavAudioSink, save_recordings, get_recording_stats
 from youtube import SongInfo, extract_song_info
 
@@ -26,6 +29,9 @@ class GuildPlayer:
     queue: deque[SongInfo] = field(default_factory=deque)
     current_song: SongInfo | None = None
     autoplay_enabled: bool = False
+    song_start_time: float | None = None
+    paused_at: float | None = None
+    total_paused_time: float = 0.0
     ytmusic: YouTubeMusicHandler = field(default_factory=YouTubeMusicHandler)
     autoplay_queue: deque[SongInfo] = field(default_factory=deque)  # Pre-fetched autoplay songs
     recent_songs: deque[str] = field(default_factory=deque)  # Recent video IDs for blended recommendations
@@ -133,7 +139,7 @@ class MusicPlayerManager:
                     song = player.autoplay_queue.popleft()
                 elif player.current_song:
                     # Fallback: fetch one song on-demand if queue is empty
-                    song = await self._get_autoplay_song(player)
+                    song = await self._get_autoplay_song(guild_id, player)
                     if not song:
                         self._start_disconnect_timer(guild_id, player)
                         return None
@@ -177,19 +183,24 @@ class MusicPlayerManager:
 
             player.voice_client.play(source, after=after_callback)
 
+            # Track playback timing
+            player.song_start_time = time.time()
+            player.paused_at = None
+            player.total_paused_time = 0.0
+
             # Pre-fetch autoplay songs in background if autoplay is enabled
             if player.autoplay_enabled:
                 self._start_prefetch(guild_id, player)
 
             return song
 
-    async def _get_autoplay_song(self, player: GuildPlayer) -> SongInfo | None:
+    async def _get_autoplay_song(self, guild_id: int, player: GuildPlayer) -> SongInfo | None:
         """Fetch a single song from autoplay recommendations (fallback)."""
         if not player.recent_songs:
             return None
 
         # Use blended recommendations from recent songs
-        recommendations = self._get_blended_recommendations(player, limit=5)
+        recommendations = self._get_blended_recommendations(guild_id, player, limit=5)
 
         for rec in recommendations:
             song = await extract_song_info(rec["videoId"])
@@ -221,9 +232,9 @@ class MusicPlayerManager:
             player._prefetch_task = None
 
     def _get_blended_recommendations(
-        self, player: GuildPlayer, limit: int
+        self, guild_id: int, player: GuildPlayer, limit: int
     ) -> list[dict]:
-        """Get blended recommendations from recent songs."""
+        """Get blended recommendations from recent songs, sorted by guild ratings."""
         if not player.recent_songs:
             return []
 
@@ -239,6 +250,23 @@ class MusicPlayerManager:
                     seen_ids.add(rec["videoId"])
                     all_recs.append(rec)
 
+        # Sort by guild ratings: positive first, neutral middle, heavily disliked last
+        ratings = get_guild_ratings(guild_id)
+
+        def rating_sort_key(rec: dict) -> tuple[int, int]:
+            score = ratings.get(rec["videoId"], 0)
+            # Group: 0 = positive (score > 0), 1 = neutral (score == 0), 2 = disliked (score < 0 but > -2), 3 = heavily disliked (score <= -2)
+            if score > 0:
+                group = 0
+            elif score == 0:
+                group = 1
+            elif score > -2:
+                group = 2
+            else:
+                group = 3
+            return (group, -score)  # Within group, sort by score descending
+
+        all_recs.sort(key=rating_sort_key)
         return all_recs[:limit]
 
     async def _prefetch_autoplay(
@@ -248,9 +276,9 @@ class MusicPlayerManager:
         if not player.recent_songs:
             return
 
-        # Get blended recommendations from recent songs
+        # Get blended recommendations from recent songs (sorted by ratings)
         recommendations = self._get_blended_recommendations(
-            player, limit=count + 2  # Get extra in case some fail
+            guild_id, player, limit=count + 2  # Get extra in case some fail
         )
 
         fetched = 0
@@ -298,6 +326,7 @@ class MusicPlayerManager:
         player = self.get_player(guild_id)
         if player.voice_client and player.voice_client.is_playing():
             player.voice_client.pause()
+            player.paused_at = time.time()
             return True
         return False
 
@@ -306,6 +335,9 @@ class MusicPlayerManager:
         player = self.get_player(guild_id)
         if player.voice_client and player.voice_client.is_paused():
             player.voice_client.resume()
+            if player.paused_at:
+                player.total_paused_time += time.time() - player.paused_at
+                player.paused_at = None
             return True
         return False
 
@@ -327,6 +359,17 @@ class MusicPlayerManager:
         player = self.get_player(guild_id)
         return list(player.queue)
 
+    async def shuffle_queue(self, guild_id: int) -> int:
+        """Shuffle the queue. Returns count of shuffled songs."""
+        player = self.get_player(guild_id)
+        async with player._lock:
+            if len(player.queue) < 2:
+                return len(player.queue)
+            queue_list = list(player.queue)
+            random.shuffle(queue_list)
+            player.queue = deque(queue_list)
+            return len(player.queue)
+
     def get_autoplay_queue(self, guild_id: int) -> list[SongInfo]:
         """Get the pre-fetched autoplay queue."""
         player = self.get_player(guild_id)
@@ -344,6 +387,26 @@ class MusicPlayerManager:
             player.voice_client
             and (player.voice_client.is_playing() or player.voice_client.is_paused())
         )
+
+    def get_elapsed_seconds(self, guild_id: int) -> int | None:
+        """Get elapsed playback time in seconds, accounting for pauses."""
+        player = self.get_player(guild_id)
+        if not player.song_start_time or not player.current_song:
+            return None
+
+        if player.paused_at:
+            # Currently paused - calculate time up to pause
+            elapsed = player.paused_at - player.song_start_time - player.total_paused_time
+        else:
+            # Currently playing
+            elapsed = time.time() - player.song_start_time - player.total_paused_time
+
+        return max(0, int(elapsed))
+
+    def is_paused(self, guild_id: int) -> bool:
+        """Check if playback is paused."""
+        player = self.get_player(guild_id)
+        return bool(player.voice_client and player.voice_client.is_paused())
 
     # ============== Recording Methods ==============
 

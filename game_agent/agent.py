@@ -9,6 +9,7 @@ from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.media import Audio
 from agno.models.openrouter import OpenRouter
+from agno.team import TeamRunEvent
 
 from settings import get_llm_model
 
@@ -76,15 +77,32 @@ class GameAgent:
         async with self._get_lock():
             async with MCPConnection(self.api_keys.exa_api_key) as mcp_tools:
                 team = create_game_team(self.db, mcp_tools)
+                seen_content = ""
 
                 async for event in team.arun(
                     input=question,
                     user_id=session.user_id_str,
                     session_id=session.session_id,
                     stream=True,
+                    stream_events=True,
                 ):
+                    # Only process run_content events to filter out tool call messages
+                    if event.event != TeamRunEvent.run_content:
+                        continue
+
                     if hasattr(event, "content") and event.content:
-                        yield event.content
+                        # Strip any MCP tool debug outputs
+                        content = self._strip_tool_outputs(event.content)
+                        if not content:
+                            continue
+
+                        # Deduplicate: skip if this content was already yielded
+                        # This handles cases where member and team emit the same content
+                        if seen_content.endswith(content) or content in seen_content:
+                            continue
+
+                        seen_content += content
+                        yield content
 
     async def ask_simple(self, guild_id: int, user_id: int, question: str) -> str:
         """
@@ -123,6 +141,7 @@ class GameAgent:
         async with self._get_lock():
             async with MCPConnection(self.api_keys.exa_api_key) as mcp_tools:
                 team = create_game_team(self.db, mcp_tools)
+                seen_content = ""
 
                 async for event in team.arun(
                     input="Listen to the audio and respond to the user's question or request.",
@@ -130,9 +149,24 @@ class GameAgent:
                     user_id=session.user_id_str,
                     session_id=session.session_id,
                     stream=True,
+                    stream_events=True,
                 ):
+                    # Only process run_content events to filter out tool call messages
+                    if event.event != TeamRunEvent.run_content:
+                        continue
+
                     if hasattr(event, "content") and event.content:
-                        yield event.content
+                        # Strip any MCP tool debug outputs
+                        content = self._strip_tool_outputs(event.content)
+                        if not content:
+                            continue
+
+                        # Deduplicate: skip if this content was already yielded
+                        if seen_content.endswith(content) or content in seen_content:
+                            continue
+
+                        seen_content += content
+                        yield content
 
     async def ask_audio_simple(
         self, guild_id: int, user_id: int, audio_data: bytes, audio_format: str = "wav"

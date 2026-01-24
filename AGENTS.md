@@ -48,7 +48,7 @@ OPENROUTER_API_KEY=your_openrouter_api_key
 
 - Standard library first, then third-party, then local modules
 - Flat import style (no blank lines between groups)
-- Use relative imports within packages (e.g., `from .agent_factory import create_game_agent`)
+- Use relative imports within packages (e.g., `from .config import AGENT_NAME`)
 
 ```python
 import asyncio

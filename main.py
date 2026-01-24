@@ -13,6 +13,8 @@ from autoplay import YouTubeMusicHandler
 from music_player import player_manager
 from youtube import extract_playlist, extract_song_info, is_playlist_url, search_youtube
 from audit.logger import log_command, AuditLogger
+from audit.database import get_user_music_stats, get_guild_music_leaderboard
+from ratings import rate_song, get_song_rating_score, get_user_rating, get_rating_counts
 
 load_dotenv()
 
@@ -73,6 +75,14 @@ client = MusicBot()
 # ============== Helper Functions ==============
 
 
+def period_to_hours(period: app_commands.Choice[str] | None) -> int | None:
+    """Convert period choice to hours. Returns None for 'all time'."""
+    if period is None:
+        return None
+    period_map = {"24h": 24, "7d": 168, "30d": 720}
+    return period_map.get(period.value)
+
+
 def format_duration(seconds: int) -> str:
     """Format seconds as MM:SS or HH:MM:SS."""
     if seconds <= 0:
@@ -82,6 +92,17 @@ def format_duration(seconds: int) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+def render_progress_bar(elapsed: int, total: int, width: int = 20) -> str:
+    """Render a progress bar with timestamps."""
+    if total <= 0:
+        return f"[{'=' * width}] Live"
+
+    progress = min(elapsed / total, 1.0)
+    filled = int(width * progress)
+    bar = "=" * filled + ">" + " " * (width - filled - 1) if filled < width else "=" * width
+    return f"[{bar}] {format_duration(elapsed)} / {format_duration(total)}"
 
 
 async def ensure_voice(interaction: discord.Interaction) -> bool:
@@ -333,6 +354,7 @@ async def queue(interaction: discord.Interaction):
 async def nowplaying(interaction: discord.Interaction):
     """Show the currently playing song."""
     guild_id = interaction.guild_id
+    user_id = interaction.user.id
     song = player_manager.get_current_song(guild_id)
 
     if not song:
@@ -344,8 +366,27 @@ async def nowplaying(interaction: discord.Interaction):
         description=f"**{song.title}**",
         color=discord.Color.blurple(),
     )
-    embed.add_field(name="Duration", value=format_duration(song.duration))
+
+    # Progress bar
+    elapsed = player_manager.get_elapsed_seconds(guild_id)
+    if elapsed is not None:
+        progress_bar = render_progress_bar(elapsed, song.duration)
+        paused_indicator = " (Paused)" if player_manager.is_paused(guild_id) else ""
+        embed.add_field(name="Progress", value=f"`{progress_bar}`{paused_indicator}", inline=False)
+    else:
+        embed.add_field(name="Duration", value=format_duration(song.duration))
+
     embed.add_field(name="URL", value=f"[Link]({song.webpage_url})")
+
+    # Rating info
+    likes, dislikes = get_rating_counts(guild_id, song.video_id)
+    user_vote = get_user_rating(guild_id, song.video_id, user_id)
+    vote_indicator = ""
+    if user_vote == 1:
+        vote_indicator = " (You: 👍)"
+    elif user_vote == -1:
+        vote_indicator = " (You: 👎)"
+    embed.add_field(name="Rating", value=f"👍 {likes} / 👎 {dislikes}{vote_indicator}")
 
     if song.thumbnail:
         embed.set_thumbnail(url=song.thumbnail)
@@ -371,6 +412,146 @@ async def clearhistory(interaction: discord.Interaction):
     guild_id = interaction.guild_id
     player_manager.clear_history(guild_id)
     await interaction.response.send_message("Autoplay history cleared. Songs can now be recommended again.")
+
+
+@client.tree.command(name="shuffle", description="Shuffle the current queue")
+@log_command
+async def shuffle(interaction: discord.Interaction):
+    """Shuffle the songs in the queue."""
+    guild_id = interaction.guild_id
+    count = await player_manager.shuffle_queue(guild_id)
+
+    if count == 0:
+        await interaction.response.send_message("Queue is empty.", ephemeral=True)
+    elif count == 1:
+        await interaction.response.send_message("Only one song in queue.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"Shuffled **{count}** songs in the queue!")
+
+
+@client.tree.command(name="stats", description="View your music listening statistics")
+@app_commands.describe(period="Time period for statistics")
+@app_commands.choices(period=[
+    app_commands.Choice(name="Last 24 hours", value="24h"),
+    app_commands.Choice(name="Last 7 days", value="7d"),
+    app_commands.Choice(name="Last 30 days", value="30d"),
+    app_commands.Choice(name="All time", value="all"),
+])
+@log_command
+async def stats(interaction: discord.Interaction, period: app_commands.Choice[str] | None = None):
+    """View your music listening statistics."""
+    guild_id = interaction.guild_id
+    user_id = interaction.user.id
+    hours = period_to_hours(period)
+
+    user_stats = get_user_music_stats(user_id, guild_id, hours)
+
+    period_name = period.name if period else "All time"
+    embed = discord.Embed(
+        title=f"Music Stats for {interaction.user.display_name}",
+        description=f"**{period_name}**",
+        color=discord.Color.purple(),
+    )
+
+    embed.add_field(name="Songs Played", value=str(user_stats["songs_played"]), inline=True)
+    embed.add_field(
+        name="Time Listened",
+        value=format_duration(user_stats["total_duration"]),
+        inline=True,
+    )
+
+    if user_stats["top_songs"]:
+        top_songs_text = "\n".join(
+            f"{i}. {song['title'][:40]}{'...' if len(song['title']) > 40 else ''} ({song['play_count']}x)"
+            for i, song in enumerate(user_stats["top_songs"], 1)
+        )
+        embed.add_field(name="Top Songs", value=top_songs_text, inline=False)
+    else:
+        embed.add_field(name="Top Songs", value="No songs played yet", inline=False)
+
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
+
+
+@client.tree.command(name="leaderboard", description="View server music leaderboard")
+@app_commands.describe(period="Time period for leaderboard")
+@app_commands.choices(period=[
+    app_commands.Choice(name="Last 24 hours", value="24h"),
+    app_commands.Choice(name="Last 7 days", value="7d"),
+    app_commands.Choice(name="Last 30 days", value="30d"),
+    app_commands.Choice(name="All time", value="all"),
+])
+@log_command
+async def leaderboard(interaction: discord.Interaction, period: app_commands.Choice[str] | None = None):
+    """View server music leaderboard."""
+    guild_id = interaction.guild_id
+    hours = period_to_hours(period)
+
+    leaderboard_data = get_guild_music_leaderboard(guild_id, hours, limit=10)
+
+    period_name = period.name if period else "All time"
+    embed = discord.Embed(
+        title=f"Music Leaderboard - {interaction.guild.name}",
+        description=f"**{period_name}**",
+        color=discord.Color.gold(),
+    )
+
+    if not leaderboard_data:
+        embed.add_field(name="No data", value="No one has played music yet!", inline=False)
+    else:
+        medals = ["🥇", "🥈", "🥉"]
+        lines = []
+        for i, entry in enumerate(leaderboard_data):
+            prefix = medals[i] if i < 3 else f"{i + 1}."
+            name = entry["user_name"] or f"User {entry['user_id']}"
+            duration = format_duration(entry["total_duration"])
+            lines.append(f"{prefix} **{name}** - {entry['songs_played']} songs ({duration})")
+
+        embed.description = f"**{period_name}**\n\n" + "\n".join(lines)
+
+    await interaction.response.send_message(embed=embed)
+
+
+async def _handle_song_rating(
+    interaction: discord.Interaction, rating: int, emoji: str, action: str
+) -> None:
+    """Handle like/dislike rating for the current song."""
+    guild_id = interaction.guild_id
+    user_id = interaction.user.id
+    song = player_manager.get_current_song(guild_id)
+
+    if not song:
+        await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+        return
+
+    current_rating = get_user_rating(guild_id, song.video_id, user_id)
+    if current_rating == rating:
+        await interaction.response.send_message(
+            f"You already {action} **{song.title}**!", ephemeral=True
+        )
+        return
+
+    rate_song(guild_id, song.video_id, user_id, rating, title=song.title)
+    likes, dislikes = get_rating_counts(guild_id, song.video_id)
+
+    await interaction.response.send_message(
+        f"{emoji} {action.capitalize()} **{song.title}**!\n"
+        f"Rating: {likes} 👍 / {dislikes} 👎"
+    )
+
+
+@client.tree.command(name="like", description="Like the current song (affects autoplay)")
+@log_command
+async def like(interaction: discord.Interaction):
+    """Like the currently playing song."""
+    await _handle_song_rating(interaction, rating=1, emoji="👍", action="liked")
+
+
+@client.tree.command(name="dislike", description="Dislike the current song (affects autoplay)")
+@log_command
+async def dislike(interaction: discord.Interaction):
+    """Dislike the currently playing song."""
+    await _handle_song_rating(interaction, rating=-1, emoji="👎", action="disliked")
 
 
 @client.tree.command(name="record", description="Start recording voice channel audio")

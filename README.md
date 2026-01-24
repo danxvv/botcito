@@ -128,7 +128,6 @@ discordbotcito/
 ├── settings.py          # SQLite-backed settings storage
 ├── game_agent/          # AI gaming assistant package
 │   ├── agent.py         # Main GameAgent class
-│   ├── agent_factory.py # Agno agent configuration
 │   ├── mcp_client.py    # MCP tools connection
 │   ├── session.py       # Per-user session context
 │   ├── config.py        # Agent instructions and paths
