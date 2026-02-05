@@ -1,0 +1,18 @@
+{
+  "mode": "custom_voice",
+  "custom_voice": {
+    "model": "Qwen/Qwen3-TTS-0.6B",
+    "speaker": "Cherry",
+    "language": "Auto"
+  },
+  "base_clone": {
+    "model": "Qwen/Qwen3-TTS-0.6B-Base",
+    "reference_audio_path": "data/voice/reference.wav",
+    "reference_text": "Your reference transcript here",
+    "language": "Auto"
+  },
+  "generation": {
+    "cfg_strength": 0.5,
+    "seed": 0
+  }
+}

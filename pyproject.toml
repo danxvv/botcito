@@ -15,6 +15,7 @@ dependencies = [
     "sqlalchemy",
     "openai>=2.15.0",
     "textual>=7.3.0",
+    "qwen-tts>=0.1.0",
 ]
 
 [project.scripts]

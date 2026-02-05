@@ -7,6 +7,13 @@ from .chatterbox_tts import (
     TTSGenerationError,
     get_tts_config,
 )
+from .qwen3_tts import (
+    Qwen3TTSProvider,
+    QwenTTSConfigurationError,
+    QwenTTSDependencyError,
+    QwenTTSRuntimeError,
+    get_qwen_tts_settings_path,
+)
 from .listener import VoiceListener
 from .conversation import VoiceConversation
 
@@ -17,6 +24,11 @@ __all__ = [
     "TTSConnectionError",
     "TTSGenerationError",
     "get_tts_config",
+    "Qwen3TTSProvider",
+    "QwenTTSConfigurationError",
+    "QwenTTSDependencyError",
+    "QwenTTSRuntimeError",
+    "get_qwen_tts_settings_path",
     "VoiceListener",
     "VoiceConversation",
 ]

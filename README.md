@@ -45,6 +45,14 @@ A feature-rich Discord music bot with YouTube playback, smart autoplay recommend
    # Optional - for /guide command
    EXA_API_KEY=your_exa_api_key
    OPENROUTER_API_KEY=your_openrouter_api_key
+
+   # TTS provider (default: local Qwen3-TTS)
+   TTS_PROVIDER=qwen
+   TTS_SETTINGS_PATH=data/tts_settings.json
+
+   # Optional Chatterbox MCP config
+   TTS_MCP_URL=http://127.0.0.1:8080/mcp
+   TTS_DEFAULT_LANGUAGE=es
    ```
 
 4. **Run the bot**
@@ -83,7 +91,7 @@ A feature-rich Discord music bot with YouTube playback, smart autoplay recommend
 | `/stoptalk` | Stop voice conversation mode |
 | `/speak <text>` | Make the bot speak text aloud |
 
-> **Note:** Voice conversation requires a TTS provider to be configured. The architecture supports pluggable providers.
+> **Note:** Qwen3-TTS is the default local provider. Chatterbox MCP is still available by setting `TTS_PROVIDER=chatterbox`.
 
 ### AI Commands
 
@@ -97,6 +105,21 @@ A feature-rich Discord music bot with YouTube playback, smart autoplay recommend
 - xAI Grok 4.1 Fast
 - Google Gemini 3 Pro / Flash
 - Anthropic Claude Sonnet 4.5 / Haiku 4.5
+
+## Qwen3-TTS Configuration (Default)
+
+- Default provider: `TTS_PROVIDER=qwen`
+- Runtime settings file: `data/tts_settings.json` (auto-created on first TTS use)
+- Example settings template: `tts_settings.example.json`
+- CUDA GPU is required for local Qwen TTS inference
+
+`data/tts_settings.json` supports two modes:
+- `custom_voice`: uses `Qwen/Qwen3-TTS-0.6B` with built-in speaker voices
+- `base_clone`: uses `Qwen/Qwen3-TTS-0.6B-Base` with `reference_audio_path` + `reference_text`
+
+To use Chatterbox instead:
+- Set `TTS_PROVIDER=chatterbox`
+- Ensure the MCP server is running and `TTS_MCP_URL` is configured
 
 ## Bot Setup (Discord Developer Portal)
 
@@ -126,6 +149,7 @@ discordbotcito/
 ├── youtube.py           # yt-dlp wrapper for audio extraction
 ├── autoplay.py          # YouTube Music API for recommendations
 ├── settings.py          # SQLite-backed settings storage
+├── tts_settings.example.json  # Example Qwen TTS settings template
 ├── game_agent/          # AI gaming assistant package
 │   ├── agent.py         # Main GameAgent class
 │   ├── mcp_client.py    # MCP tools connection
@@ -135,7 +159,8 @@ discordbotcito/
 ├── voice_agent/         # Voice conversation package
 │   ├── listener.py      # Voice activity detection and audio capture
 │   ├── conversation.py  # Listen → AI → Speak orchestrator
-│   └── tts.py           # Text-to-speech abstraction layer
+│   ├── tts.py           # Text-to-speech abstraction layer
+│   └── qwen3_tts.py     # Local Qwen3-TTS provider with JSON settings
 ├── audit/               # Command logging and TUI audit viewer
 └── data/                # SQLite databases and recordings (created at runtime)
 ```
@@ -180,6 +205,7 @@ Each Discord server gets its own `GuildPlayer` instance stored in `MusicPlayerMa
 | `agno` | AI agent framework |
 | `mcp` | Model Context Protocol for AI tools |
 | `sqlalchemy` | Database ORM |
+| `qwen-tts` | Local Qwen3 text-to-speech inference |
 
 ### Running the Audit TUI
 

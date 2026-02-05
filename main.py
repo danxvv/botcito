@@ -53,13 +53,29 @@ class MusicBot(discord.Client):
         if self._voice_conversation is None:
             from voice_agent import (
                 ChatterboxTTSProvider,
+                Qwen3TTSProvider,
                 VoiceConversation,
+                get_qwen_tts_settings_path,
                 get_tts_config,
             )
 
             agent = self.get_game_agent()
-            mcp_url, language = get_tts_config()
-            tts_provider = ChatterboxTTSProvider(mcp_url=mcp_url, default_language=language)
+            provider_name = os.getenv("TTS_PROVIDER", "qwen").strip().lower()
+
+            if provider_name == "qwen":
+                tts_provider = Qwen3TTSProvider(
+                    settings_path=get_qwen_tts_settings_path()
+                )
+            elif provider_name == "chatterbox":
+                mcp_url, language = get_tts_config()
+                tts_provider = ChatterboxTTSProvider(
+                    mcp_url=mcp_url,
+                    default_language=language,
+                )
+            else:
+                raise ValueError(
+                    "Invalid TTS_PROVIDER value. Use `qwen` or `chatterbox`."
+                )
 
             self._voice_conversation = VoiceConversation(
                 game_agent=agent,
@@ -133,10 +149,22 @@ def _log_music_event(interaction: discord.Interaction, song, source_type: str, a
 
 def get_tts_error_message(error: Exception) -> str:
     """Get a user-friendly error message for TTS exceptions."""
-    from voice_agent import TTSConnectionError, TTSGenerationError
+    from voice_agent import (
+        QwenTTSConfigurationError,
+        QwenTTSDependencyError,
+        QwenTTSRuntimeError,
+        TTSConnectionError,
+        TTSGenerationError,
+    )
 
     if isinstance(error, TTSConnectionError):
         return "TTS server not available. Make sure Chatterbox TTS is running."
+    if isinstance(error, QwenTTSConfigurationError):
+        return f"Invalid Qwen TTS settings: {error}"
+    if isinstance(error, QwenTTSDependencyError):
+        return f"Qwen TTS dependency error: {error}"
+    if isinstance(error, QwenTTSRuntimeError):
+        return f"Qwen TTS error: {error}"
     if isinstance(error, TTSGenerationError):
         return f"Failed to generate speech: {error}"
     if isinstance(error, NotImplementedError):
@@ -148,10 +176,22 @@ def get_tts_error_message(error: Exception) -> str:
 
 def get_tts_footer_status(error: Exception) -> str:
     """Get a short TTS error status for embed footers."""
-    from voice_agent import TTSConnectionError, TTSGenerationError
+    from voice_agent import (
+        QwenTTSConfigurationError,
+        QwenTTSDependencyError,
+        QwenTTSRuntimeError,
+        TTSConnectionError,
+        TTSGenerationError,
+    )
 
     if isinstance(error, TTSConnectionError):
         return "TTS server unavailable"
+    if isinstance(error, QwenTTSConfigurationError):
+        return "Qwen settings invalid"
+    if isinstance(error, QwenTTSDependencyError):
+        return "Qwen dependency missing"
+    if isinstance(error, QwenTTSRuntimeError):
+        return f"Qwen error: {str(error)[:40]}"
     if isinstance(error, TTSGenerationError):
         return f"TTS error: {str(error)[:50]}"
     if isinstance(error, NotImplementedError):
