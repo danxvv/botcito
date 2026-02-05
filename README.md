@@ -8,6 +8,8 @@ A feature-rich Discord music bot with YouTube playback, smart autoplay recommend
 - **Smart Autocomplete** - Real-time song suggestions as you type using YouTube Music
 - **Autoplay** - Automatic song recommendations based on your listening history
 - **Queue Management** - Full queue controls with pause, resume, skip, and stop
+- **Voice Recording** - Record voice channel audio with per-user WAV files
+- **Voice Conversation** - Talk to the AI assistant using voice (requires TTS provider)
 - **AI Gaming Assistant** - Get help with game strategies, builds, and tips using web search
 - **Auto-disconnect** - Bot automatically leaves after 5 minutes of inactivity
 
@@ -66,6 +68,23 @@ A feature-rich Discord music bot with YouTube playback, smart autoplay recommend
 | `/autoplay` | Toggle autoplay mode on/off |
 | `/clearhistory` | Clear autoplay history to allow songs to repeat |
 
+### Recording Commands
+
+| Command | Description |
+|---------|-------------|
+| `/record` | Start recording voice channel audio |
+| `/stoprecord` | Stop recording and save audio files |
+
+### Voice Conversation Commands
+
+| Command | Description |
+|---------|-------------|
+| `/talk` | Start voice conversation mode - bot listens and responds |
+| `/stoptalk` | Stop voice conversation mode |
+| `/speak <text>` | Make the bot speak text aloud |
+
+> **Note:** Voice conversation requires a TTS provider to be configured. The architecture supports pluggable providers.
+
 ### AI Commands
 
 | Command | Description |
@@ -103,18 +122,22 @@ A feature-rich Discord music bot with YouTube playback, smart autoplay recommend
 discordbotcito/
 ├── main.py              # Bot entry point, slash command handlers
 ├── music_player.py      # Per-guild player state and queue management
+├── voice_recorder.py    # Voice channel recording (per-user WAV files)
 ├── youtube.py           # yt-dlp wrapper for audio extraction
 ├── autoplay.py          # YouTube Music API for recommendations
 ├── settings.py          # SQLite-backed settings storage
 ├── game_agent/          # AI gaming assistant package
 │   ├── agent.py         # Main GameAgent class
-│   ├── agent_factory.py # Agno agent configuration
 │   ├── mcp_client.py    # MCP tools connection
 │   ├── session.py       # Per-user session context
 │   ├── config.py        # Agent instructions and paths
 │   └── environment.py   # Environment validation
+├── voice_agent/         # Voice conversation package
+│   ├── listener.py      # Voice activity detection and audio capture
+│   ├── conversation.py  # Listen → AI → Speak orchestrator
+│   └── tts.py           # Text-to-speech abstraction layer
 ├── audit/               # Command logging and TUI audit viewer
-└── data/                # SQLite databases (created at runtime)
+└── data/                # SQLite databases and recordings (created at runtime)
 ```
 
 ### Architecture
@@ -151,6 +174,7 @@ Each Discord server gets its own `GuildPlayer` instance stored in `MusicPlayerMa
 | Package | Purpose |
 |---------|---------|
 | `discord.py[voice]` | Discord API and voice support |
+| `discord-ext-voice-recv` | Voice receiving for recording and conversation |
 | `yt-dlp` | YouTube audio extraction |
 | `ytmusicapi` | YouTube Music search and recommendations |
 | `agno` | AI agent framework |

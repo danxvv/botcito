@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "discord.py[voice]>=2.6.0,<3.0.0",
+    "discord-ext-voice-recv>=0.5.0",
     "yt-dlp>=2025.1.0",
     "ytmusicapi>=1.11.0,<2.0.0",
     "python-dotenv>=1.0.0,<2.0.0",
@@ -27,4 +28,4 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["audit*", "game_agent*"]
+include = ["audit*", "game_agent*", "voice_agent*"]

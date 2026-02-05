@@ -46,7 +46,6 @@ OPENROUTER_API_KEY=your_openrouter_api_key
 - **settings.py** - SQLite-backed settings management (stores LLM model preference in `data/settings.db`)
 - **game_agent/** - AI gaming assistant package using Agno framework with Exa MCP for web search:
   - `agent.py` - Main `GameAgent` class with streaming `ask()` method
-  - `agent_factory.py` - Creates configured Agno agent instances
   - `mcp_client.py` - MCP tools connection lifecycle (async context manager)
   - `session.py` - Session context for per-user memory isolation
   - `config.py` - Agent instructions and path configuration

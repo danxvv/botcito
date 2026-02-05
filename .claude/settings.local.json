@@ -16,7 +16,10 @@
       "Bash(python -m py_compile:*)",
       "Bash(python:*)",
       "Bash(uv run python:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(uv pip install:*)"
     ]
   }
 }

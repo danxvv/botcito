@@ -4,16 +4,19 @@ __pycache__/
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
 
 # Virtual environments
-.venv
+.venv/
 
 # Environment variables
 .env
 
 # Database files
 data/
+
+# IDE and tools
+.claude/
 
 # Windows artifacts
 nul

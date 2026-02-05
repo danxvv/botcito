@@ -245,3 +245,83 @@ def get_total_stats() -> dict:
             "unique_guilds": guild_count,
             "unique_users": user_count,
         }
+
+
+def get_user_music_stats(user_id: int, guild_id: int | None, hours: int | None) -> dict:
+    """Get music listening statistics for a user.
+
+    Returns: {songs_played, total_duration, top_songs}
+    """
+    with get_connection() as conn:
+        params = [user_id]
+        time_filter = ""
+        guild_filter = ""
+
+        if hours:
+            since = datetime.now() - timedelta(hours=hours)
+            time_filter = " AND timestamp > ?"
+            params.append(since.isoformat())
+
+        if guild_id:
+            guild_filter = " AND guild_id = ?"
+            params.append(guild_id)
+
+        # Get songs played count and total duration
+        stats_query = f"""
+            SELECT COUNT(*) as songs_played, COALESCE(SUM(duration), 0) as total_duration
+            FROM music_logs
+            WHERE user_id = ? AND action = 'play'{time_filter}{guild_filter}
+        """
+        stats_row = conn.execute(stats_query, params).fetchone()
+
+        # Get top songs
+        top_params = [user_id]
+        if hours:
+            top_params.append(since.isoformat())
+        if guild_id:
+            top_params.append(guild_id)
+
+        top_query = f"""
+            SELECT video_id, title, COUNT(*) as play_count
+            FROM music_logs
+            WHERE user_id = ? AND action = 'play'{time_filter}{guild_filter}
+            GROUP BY video_id
+            ORDER BY play_count DESC
+            LIMIT 5
+        """
+        top_rows = conn.execute(top_query, top_params).fetchall()
+
+        return {
+            "songs_played": stats_row["songs_played"],
+            "total_duration": stats_row["total_duration"],
+            "top_songs": [dict(row) for row in top_rows],
+        }
+
+
+def get_guild_music_leaderboard(guild_id: int, hours: int | None, limit: int = 10) -> list[dict]:
+    """Get music leaderboard for a guild.
+
+    Returns: [{user_id, user_name, songs_played, total_duration}, ...]
+    """
+    with get_connection() as conn:
+        params = [guild_id]
+        time_filter = ""
+
+        if hours:
+            since = datetime.now() - timedelta(hours=hours)
+            time_filter = " AND timestamp > ?"
+            params.append(since.isoformat())
+
+        params.append(limit)
+
+        query = f"""
+            SELECT user_id, user_name, COUNT(*) as songs_played,
+                   COALESCE(SUM(duration), 0) as total_duration
+            FROM music_logs
+            WHERE guild_id = ? AND action = 'play'{time_filter}
+            GROUP BY user_id
+            ORDER BY songs_played DESC
+            LIMIT ?
+        """
+        rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]

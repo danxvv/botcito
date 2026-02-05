@@ -44,4 +44,7 @@ def validate_environment() -> ApiKeys:
             f"Required environment variable(s) missing: {', '.join(missing_vars)}"
         )
 
-    return ApiKeys(exa_api_key=exa_api_key, openrouter_api_key=openrouter_api_key)
+    return ApiKeys(
+        exa_api_key=exa_api_key,
+        openrouter_api_key=openrouter_api_key,
+    )
