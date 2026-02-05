@@ -1,242 +1,157 @@
 # AGENTS.md
 
-Guidelines for AI coding agents working in this Discord music bot repository.
+Guidance for coding agents working in this `discordbotcito` repository.
 
-## Project Overview
+## Project Snapshot
 
-Discord music bot with slash commands, YouTube playback via Opus streaming, autoplay functionality using YouTube Music recommendations, and an AI-powered gaming assistant. Uses Python 3.10+ with async/await patterns throughout.
+- Discord bot focused on music playback, autoplay recommendations, recording, and AI assistant features.
+- Python 3.10+ codebase with heavy async usage (`discord.py`, `yt-dlp`, SQLite, Agno).
+- Package/dependency workflow uses `uv` (prefer `uv` for all Python commands).
 
-## Build and Run Commands
+## Build, Run, and Verification Commands
+
+Use these commands from repo root.
 
 ```bash
-# Install dependencies (uses uv package manager)
+# Install/update dependencies
 uv sync
 
 # Run the bot
 uv run python main.py
 
-# Run the audit TUI
+# Run audit TUI app
 uv run audit
+
+# Quick syntax check (useful before commit)
+uv run python -m compileall .
 ```
 
-## External Dependencies
+## Lint and Format
 
-The bot requires these external tools installed on the system:
-- **FFmpeg** - Required for audio playback/streaming
-- **Deno or Node.js** - Required by yt-dlp for YouTube JavaScript extraction
+- No dedicated linter/formatter config is currently checked in (`ruff`, `black`, `mypy`, etc. not configured).
+- Follow existing file style and keep edits minimal/diff-friendly.
+- If adding lint tooling, add config to `pyproject.toml` and document commands here.
 
 ## Testing
 
-This project currently has no automated tests. When adding tests:
-- Place tests in a `tests/` directory
-- Use pytest: `uv run pytest tests/`
-- Run a single test: `uv run pytest tests/test_file.py::test_function -v`
+- There is currently no `tests/` directory in the repository.
+- When creating tests, use `pytest` under `tests/`.
 
-## Environment Variables
+```bash
+# Run full test suite
+uv run pytest tests/
 
-Required in `.env` file:
+# Run a single test file
+uv run pytest tests/test_file.py -v
+
+# Run one specific test function (most important)
+uv run pytest tests/test_file.py::test_function -v
+
+# Optional: run tests matching a keyword
+uv run pytest tests/ -k "keyword" -v
 ```
+
+## Environment and External Tools
+
+Required runtime dependencies:
+- `FFmpeg` for audio playback/transcoding.
+- `Deno` or `Node.js` for yt-dlp JavaScript extraction.
+
+Environment variables (`.env`):
+
+```env
 DISCORD_TOKEN=your_bot_token_here
-# For /guide command (optional):
+
+# Optional /guide feature:
 EXA_API_KEY=your_exa_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
 ```
 
-## Code Style Guidelines
+## Repository Layout (Key Areas)
+
+- `main.py`: Discord client setup and slash command handlers.
+- `music_player.py`: per-guild player state, queue logic, autoplay, voice connection handling.
+- `youtube.py`: async wrappers around blocking `yt-dlp` extraction.
+- `autoplay.py`: YouTube Music recommendation logic.
+- `voice_agent/`: voice conversation orchestration and TTS abstraction.
+- `game_agent/`: AI assistant, session context, MCP connection management.
+- `audit/`: audit database + textual TUI viewer.
+- `settings.py`: SQLite-backed model/settings storage.
+
+## Code Style and Conventions
 
 ### Imports
 
-- Standard library first, then third-party, then local modules
-- Flat import style (no blank lines between groups)
-- Use relative imports within packages (e.g., `from .config import AGENT_NAME`)
+- Keep import groups in this order: standard library, third-party, local modules.
+- Use a blank line between import groups (matches current files).
+- Prefer relative imports inside packages (for example inside `game_agent/`, `audit/`, `voice_agent/`).
 
-```python
-import asyncio
-import os
-from dataclasses import dataclass
+### Formatting
 
-import discord
-from discord import app_commands
+- Use 4-space indentation and keep formatting consistent with surrounding code.
+- Prefer readable multi-line function signatures/calls when lines get long.
+- Keep module docstring as a short first line in each module.
+- Avoid broad stylistic rewrites in unrelated code.
 
-from autoplay import YouTubeMusicHandler
-from music_player import player_manager
-```
+### Types
 
-### Type Hints
+- Add type hints for new/updated functions, including return types.
+- Prefer Python 3.10+ type syntax:
+  - `str | None` over `Optional[str]`
+  - `dict[str, Any]` over `Dict[str, Any]`
+- Current code sometimes uses `typing.AsyncGenerator`; this is acceptable in existing files.
 
-Use modern Python 3.10+ syntax throughout:
+### Naming
 
-```python
-# Use built-in generics, not typing module
-dict[str, Any]           # not Dict[str, Any]
-list[SongInfo]           # not List[SongInfo]
-str | None               # not Optional[str]
-AsyncGenerator[str, None]  # for async generators
-```
+- `snake_case`: functions, variables, modules.
+- `PascalCase`: classes.
+- `SCREAMING_SNAKE_CASE`: constants.
+- Prefix internal helpers/fields with `_` when non-public.
 
-Always add return type hints to functions:
+### Data Modeling
 
-```python
-def format_duration(seconds: int) -> str:
-async def extract_song_info(query: str) -> SongInfo | None:
-async def ask(self, guild_id: int, user_id: int, question: str) -> AsyncGenerator[str, None]:
-```
+- Prefer `@dataclass` for state/data containers (`SongInfo`, `GuildPlayer`, `ApiKeys`).
+- Use `field(default_factory=...)` for mutable defaults.
+- Use `frozen=True` only when immutable semantics are intended.
 
-### Naming Conventions
+### Async and Concurrency Patterns
 
-- `snake_case` for functions, variables, and modules
-- `PascalCase` for classes (e.g., `MusicPlayerManager`, `GameAgent`)
-- `SCREAMING_SNAKE_CASE` for constants (e.g., `DISCONNECT_TIMEOUT`, `FFMPEG_OPTIONS`)
-- Private methods/attributes prefixed with underscore (e.g., `_get_autoplay_song`, `_lock`)
-
-### Docstrings
-
-Use Google-style docstrings:
-
-```python
-async def extract_song_info(query: str) -> SongInfo | None:
-    """
-    Extract song information from a URL or video ID.
-
-    Args:
-        query: YouTube URL, video ID, or search query
-
-    Returns:
-        SongInfo object or None if extraction failed
-    """
-```
-
-Module-level docstrings are one-liners:
-
-```python
-"""Music player with queue management, autoplay, and auto-disconnect."""
-```
-
-### Dataclasses
-
-Heavy use of dataclasses for data containers:
-
-```python
-@dataclass
-class SongInfo:
-    """Information about a song."""
-    url: str
-    title: str
-    duration: int
-
-@dataclass(frozen=True)
-class ApiKeys:
-    """Container for validated API keys."""
-    exa_api_key: str
-    openrouter_api_key: str
-
-@dataclass
-class GuildPlayer:
-    voice_client: discord.VoiceClient | None = None
-    queue: deque[SongInfo] = field(default_factory=deque)
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
-```
+- Keep Discord and network/file operations async where possible.
+- Offload blocking work (yt-dlp, heavy CPU) via `run_in_executor`.
+- Protect shared mutable per-guild state with `asyncio.Lock`.
+- From sync callbacks (e.g., voice `after`), schedule coroutines with `asyncio.run_coroutine_threadsafe`.
 
 ### Error Handling
 
-- Raise specific exception types, not generic Exception
-- Use try/except with specific exceptions
-- Log errors with `logger.exception()` for stack traces
-- Limit error message length when displaying to users (e.g., `str(e)[:500]`)
+- Raise specific exceptions for validation/config failures.
+- Catch specific library exceptions where feasible (`DownloadError`, etc.).
+- Keep user-facing error messages concise and safe (truncate where needed).
+- Re-raise after logging when caller behavior depends on exception flow.
 
-```python
-class MissingEnvironmentVariableError(Exception):
-    """Raised when required environment variables are missing."""
-    pass
+### Discord Bot Patterns
 
-# Specific exception handling
-try:
-    return ydl.extract_info(url, download=False)
-except yt_dlp.utils.DownloadError as e:
-    error_msg = str(e)
-    if "JavaScript" in error_msg:
-        print("Error: yt-dlp requires Deno/Node.js for YouTube.")
-    return None
-except Exception:
-    return None
-```
+- Validate voice prerequisites early in slash commands.
+- Defer interactions when work may take time (`await interaction.response.defer()`).
+- Keep responses user-friendly; prefer ephemeral responses for user-specific failures.
+- Respect guild-scoped state boundaries (`guild_id` keyed player/session state).
 
-### Async Patterns
+## Data and Persistence Notes
 
-- Use `async/await` for all Discord operations and I/O
-- Use `asyncio.Lock` for thread-safe state management
-- Use `asyncio.run_coroutine_threadsafe()` for scheduling from sync callbacks
-- Use `asyncio.wait_for()` with timeouts for external connections
-- Use `ThreadPoolExecutor` for blocking operations (like yt-dlp)
+- SQLite files are created under `data/` at runtime.
+- Important DB files:
+  - `data/settings.db`
+  - `data/audit.db`
+  - `data/agent_memory.db`
 
-```python
-# Running blocking code in executor
-loop = asyncio.get_running_loop()
-info = await loop.run_in_executor(_executor, _extract_single_info, query)
+## Agent Workflow Recommendations
 
-# Scheduling coroutine from sync callback
-asyncio.run_coroutine_threadsafe(
-    self.play_next(guild_id),
-    player.voice_client.loop,
-)
+- Make focused, minimal edits and preserve existing behavior unless task requires changes.
+- Run targeted validation for touched areas (at least `compileall`; tests if present/added).
+- Do not commit generated artifacts, secrets, or local runtime data.
+- Prefer documenting new operational commands in `README.md` and this file.
 
-# Thread-safe state access
-async with player._lock:
-    player.autoplay_queue.append(song)
-```
+## Cursor/Copilot Rules
 
-### Design Patterns
-
-**Singleton pattern** for global instances:
-```python
-player_manager = MusicPlayerManager()
-```
-
-**Lazy loading** for optional features:
-```python
-_game_agent = None
-
-def get_game_agent():
-    global _game_agent
-    if _game_agent is None:
-        from game_agent import GameAgent
-        _game_agent = GameAgent()
-    return _game_agent
-```
-
-**Async context manager** for resource management:
-```python
-async with MCPConnection(api_key) as mcp_tools:
-    agent = create_game_agent(self.db, mcp_tools)
-```
-
-**Decorator pattern** for cross-cutting concerns:
-```python
-@log_command
-async def play(interaction: discord.Interaction, query: str):
-    ...
-```
-
-## Architecture Notes
-
-### Guild-Scoped State
-
-Each Discord server gets its own `GuildPlayer` instance stored in `MusicPlayerManager.players` dict keyed by `guild_id`.
-
-### Key Files
-
-| File | Purpose |
-|------|---------|
-| `main.py` | Bot entry point, slash command handlers |
-| `music_player.py` | Per-guild player state, queue, voice connections |
-| `youtube.py` | yt-dlp wrapper for audio extraction |
-| `autoplay.py` | YouTube Music API for recommendations |
-| `settings.py` | SQLite-backed settings management |
-| `game_agent/` | AI gaming assistant package |
-| `audit/` | TUI monitoring app and logging |
-
-### Data Storage
-
-- Settings stored in `data/settings.db` (SQLite)
-- Audit logs stored in `data/audit.db` (SQLite)
-- Agent memory stored in `data/agent_memory.db` (SQLite)
+- No Cursor rules were found (`.cursor/rules/` or `.cursorrules` absent).
+- No Copilot instructions were found (`.github/copilot-instructions.md` absent).
+- If these files are later added, treat them as higher-priority supplemental instructions and mirror key constraints in this document.
