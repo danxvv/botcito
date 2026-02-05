@@ -49,6 +49,37 @@ class GameAgent:
             self._lock = asyncio.Lock()
         return self._lock
 
+    async def _stream_team_response(self, session, **run_kwargs) -> AsyncGenerator[str, None]:
+        async with self._get_lock():
+            async with MCPConnection(self.api_keys.exa_api_key) as mcp_tools:
+                team = create_game_team(self.db, mcp_tools)
+                seen_content = ""
+
+                async for event in team.arun(
+                    user_id=session.user_id_str,
+                    session_id=session.session_id,
+                    stream=True,
+                    stream_events=True,
+                    **run_kwargs,
+                ):
+                    # Only process run_content events to filter out tool call messages
+                    if event.event != TeamRunEvent.run_content:
+                        continue
+
+                    if hasattr(event, "content") and event.content:
+                        # Strip any MCP tool debug outputs
+                        content = self._strip_tool_outputs(event.content)
+                        if not content:
+                            continue
+
+                        # Deduplicate: skip if this content was already yielded
+                        # This handles cases where member and team emit the same content
+                        if seen_content.endswith(content) or content in seen_content:
+                            continue
+
+                        seen_content += content
+                        yield content
+
     async def ask(
         self, guild_id: int, user_id: int, question: str
     ) -> AsyncGenerator[str, None]:
@@ -74,35 +105,8 @@ class GameAgent:
 
         session = create_session_context(guild_id, user_id)
 
-        async with self._get_lock():
-            async with MCPConnection(self.api_keys.exa_api_key) as mcp_tools:
-                team = create_game_team(self.db, mcp_tools)
-                seen_content = ""
-
-                async for event in team.arun(
-                    input=question,
-                    user_id=session.user_id_str,
-                    session_id=session.session_id,
-                    stream=True,
-                    stream_events=True,
-                ):
-                    # Only process run_content events to filter out tool call messages
-                    if event.event != TeamRunEvent.run_content:
-                        continue
-
-                    if hasattr(event, "content") and event.content:
-                        # Strip any MCP tool debug outputs
-                        content = self._strip_tool_outputs(event.content)
-                        if not content:
-                            continue
-
-                        # Deduplicate: skip if this content was already yielded
-                        # This handles cases where member and team emit the same content
-                        if seen_content.endswith(content) or content in seen_content:
-                            continue
-
-                        seen_content += content
-                        yield content
+        async for chunk in self._stream_team_response(session, input=question):
+            yield chunk
 
     async def ask_simple(self, guild_id: int, user_id: int, question: str) -> str:
         """
@@ -138,35 +142,12 @@ class GameAgent:
         """
         session = create_session_context(guild_id, user_id)
 
-        async with self._get_lock():
-            async with MCPConnection(self.api_keys.exa_api_key) as mcp_tools:
-                team = create_game_team(self.db, mcp_tools)
-                seen_content = ""
-
-                async for event in team.arun(
-                    input="Listen to the audio and respond to the user's question or request.",
-                    audio=[Audio(content=audio_data, format=audio_format)],
-                    user_id=session.user_id_str,
-                    session_id=session.session_id,
-                    stream=True,
-                    stream_events=True,
-                ):
-                    # Only process run_content events to filter out tool call messages
-                    if event.event != TeamRunEvent.run_content:
-                        continue
-
-                    if hasattr(event, "content") and event.content:
-                        # Strip any MCP tool debug outputs
-                        content = self._strip_tool_outputs(event.content)
-                        if not content:
-                            continue
-
-                        # Deduplicate: skip if this content was already yielded
-                        if seen_content.endswith(content) or content in seen_content:
-                            continue
-
-                        seen_content += content
-                        yield content
+        async for chunk in self._stream_team_response(
+            session,
+            input="Listen to the audio and respond to the user's question or request.",
+            audio=[Audio(content=audio_data, format=audio_format)],
+        ):
+            yield chunk
 
     async def ask_audio_simple(
         self, guild_id: int, user_id: int, audio_data: bytes, audio_format: str = "wav"
@@ -244,16 +225,9 @@ Decide if this response should be spoken aloud."""
         """
         text = response
 
-        if "```json" in text:
-            parts = text.split("```json")
-            if len(parts) > 1:
-                inner_parts = parts[1].split("```")
-                if inner_parts:
-                    text = inner_parts[0].strip()
-        elif "```" in text:
-            parts = text.split("```")
-            if len(parts) > 1:
-                text = parts[1].strip()
+        match = re.search(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL)
+        if match:
+            text = match.group(1).strip()
 
         try:
             data = json.loads(text)
@@ -295,8 +269,8 @@ Decide if this response should be spoken aloud."""
         """
         Clean text for TTS by removing markdown formatting and tool outputs.
 
-        First strips MCP tool debug outputs, then uses an LLM to remove
-        all formatting (headers, bold, italic, lists, code blocks, etc.)
+        First strips MCP tool debug outputs, then removes all markdown
+        formatting (headers, bold, italic, lists, code blocks, etc.)
         while preserving the actual content and punctuation.
 
         Args:
@@ -314,26 +288,26 @@ Decide if this response should be spoken aloud."""
         if not text.strip():
             return text
 
-        cleaning_agent = Agent(
-            model=OpenRouter(id=get_llm_model(), api_key=self.api_keys.openrouter_api_key),
-            instructions=(
-                "You are a text cleaner. Remove ALL markdown formatting from the input text. "
-                "Remove: headers (#), bold (**), italic (*), code blocks (```), inline code (`), "
-                "bullet points (- or *), numbered lists, links, and any other formatting. "
-                "Keep only the plain text content and punctuation. "
-                "Do not add any commentary, just output the cleaned text."
-            ),
-        )
+        # Remove code blocks
+        text = re.sub(r'```[\s\S]*?```', '', text)
+        # Remove inline code
+        text = re.sub(r'`([^`]+)`', r'\1', text)
+        # Remove headers
+        text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+        # Remove bold/italic (asterisks and underscores)
+        text = re.sub(r'\*{1,3}(.+?)\*{1,3}', r'\1', text)
+        text = re.sub(r'_{1,3}(.+?)_{1,3}', r'\1', text)
+        # Remove links, keep link text
+        text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+        # Remove bullet points
+        text = re.sub(r'^[\s]*[-*+]\s+', '', text, flags=re.MULTILINE)
+        # Remove numbered lists prefix
+        text = re.sub(r'^[\s]*\d+\.\s+', '', text, flags=re.MULTILINE)
+        # Clean up extra whitespace
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r'  +', ' ', text)
 
-        chunks = []
-        async for event in cleaning_agent.arun(
-            input=f"Clean this text for speech:\n\n{text}",
-            stream=True,
-        ):
-            if hasattr(event, "content") and event.content:
-                chunks.append(event.content)
-
-        return "".join(chunks).strip()
+        return text.strip()
 
     async def transcribe_audio(
         self, audio_data: bytes, audio_format: str = "wav"

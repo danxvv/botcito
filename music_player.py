@@ -2,6 +2,7 @@
 
 import asyncio
 import random
+import subprocess
 import time
 import uuid
 from collections import deque
@@ -11,6 +12,7 @@ from datetime import datetime
 import discord
 from discord.ext import voice_recv
 
+from audio_cache import audio_cache
 from autoplay import YouTubeMusicHandler
 from ratings import get_guild_ratings
 from voice_recorder import RecordingSession, WavAudioSink, save_recordings, get_recording_stats
@@ -44,10 +46,20 @@ class GuildPlayer:
 
 
 # FFmpeg options for reconnecting on network issues
-FFMPEG_BEFORE_OPTIONS = (
-    "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-)
-FFMPEG_OPTIONS = "-vn"
+# Include User-Agent header to avoid 403 errors from YouTube
+
+def _get_ffmpeg_before_options() -> str:
+    """Build FFmpeg before_options with cookies if available."""
+    base_opts = (
+        "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
+        "-reconnect_on_network_error 1 -reconnect_on_http_error 4xx,5xx "
+        '-headers "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\n"'
+    )
+    return base_opts
+
+FFMPEG_BEFORE_OPTIONS = _get_ffmpeg_before_options()
+# Output options for audio conversion
+FFMPEG_OPTIONS = "-vn -bufsize 64k"
 
 # Auto-disconnect timeout in seconds
 DISCONNECT_TIMEOUT = 300  # 5 minutes
@@ -111,6 +123,9 @@ class MusicPlayerManager:
         player.current_song = None
         player.ytmusic.clear_history()
 
+        # Clean up audio cache
+        audio_cache.cleanup_all()
+
         return recording_result
 
     async def add_to_queue(self, guild_id: int, song: SongInfo) -> int:
@@ -118,6 +133,109 @@ class MusicPlayerManager:
         player = self.get_player(guild_id)
         player.queue.append(song)
         return len(player.queue)
+
+    async def _get_next_song(self, guild_id: int, player: GuildPlayer) -> SongInfo | None:
+        """Get next song from queue or autoplay. Starts disconnect timer if nothing available."""
+        if player.queue:
+            return player.queue.popleft()
+
+        if player.autoplay_enabled:
+            if player.autoplay_queue:
+                return player.autoplay_queue.popleft()
+            if player.current_song:
+                song = await self._get_autoplay_song(guild_id, player)
+                if song:
+                    return song
+
+        player.current_song = None
+        self._start_disconnect_timer(guild_id, player)
+        return None
+
+    async def _create_audio_source(
+        self, song: SongInfo, player: GuildPlayer, guild_id: int
+    ) -> discord.PCMVolumeTransformer | None:
+        """Create FFmpeg audio source from cached file or stream URL."""
+        audio_source = None
+
+        # Download audio file for reliable playback
+        print(f"[DEBUG] Downloading: {song.title}")
+        downloaded = await audio_cache.ensure_downloaded(song)
+        if downloaded and song.local_path:
+            print(f"[DEBUG] Playing from cache: {song.local_path}")
+            audio_source = song.local_path
+        else:
+            print(f"[DEBUG] Cache failed, falling back to stream")
+
+        # Fallback to streaming URL
+        if not audio_source:
+            print(f"[DEBUG] Playing stream: {song.title}")
+            print(f"[DEBUG] URL starts with: {song.url[:80]}...")
+            if not song.url or not song.url.startswith("http"):
+                print(f"[ERROR] Invalid URL for song: {song.title}")
+                self._start_disconnect_timer(guild_id, player)
+                return None
+            audio_source = song.url
+
+        try:
+            # Only use network options for streaming URLs, not local files
+            before_opts = FFMPEG_BEFORE_OPTIONS if audio_source.startswith("http") else None
+
+            source = discord.FFmpegPCMAudio(
+                audio_source,
+                before_options=before_opts,
+                options=FFMPEG_OPTIONS,
+                stderr=subprocess.PIPE,  # Capture FFmpeg errors
+            )
+        except Exception as e:
+            print(f"[ERROR] Failed to create FFmpeg source: {e}")
+            self._start_disconnect_timer(guild_id, player)
+            return None
+
+        return discord.PCMVolumeTransformer(source, volume=player.volume)
+
+    def _make_after_callback(self, song: SongInfo, player: GuildPlayer, guild_id: int, source):
+        """Create the after-playback callback for voice client."""
+        def after_callback(error):
+            # Check FFmpeg process status
+            ffmpeg_error = False
+            return_code = None
+            if hasattr(source, 'original') and hasattr(source.original, '_process'):
+                proc = source.original._process
+                if proc:
+                    return_code = proc.returncode
+                    # Non-zero return code indicates FFmpeg error
+                    if return_code and return_code != 0:
+                        ffmpeg_error = True
+                        # Read stderr if available
+                        stderr_output = ""
+                        if proc.stderr:
+                            try:
+                                stderr_output = proc.stderr.read().decode('utf-8', errors='replace')
+                            except Exception:
+                                pass
+                        print(f"[ERROR] FFmpeg crashed with code {return_code} for: {song.title}")
+                        if stderr_output:
+                            print(f"[ERROR] FFmpeg stderr: {stderr_output[:500]}")
+
+            if error:
+                print(f"[ERROR] Playback error: {error}")
+            elif ffmpeg_error:
+                print(f"[ERROR] FFmpeg abnormal exit (code {return_code}) for: {song.title}")
+            else:
+                print(f"[DEBUG] Playback finished for: {song.title}")
+
+            # Clean up cached file after playback
+            if song.local_path:
+                audio_cache.remove(song.video_id)
+
+            # Schedule next song
+            if player.voice_client and player.voice_client.loop:
+                asyncio.run_coroutine_threadsafe(
+                    self.play_next(guild_id),
+                    player.voice_client.loop,
+                )
+
+        return after_callback
 
     async def play_next(self, guild_id: int) -> SongInfo | None:
         """Play the next song in queue or use pre-fetched autoplay."""
@@ -130,27 +248,8 @@ class MusicPlayerManager:
             if not player.voice_client or not player.voice_client.is_connected():
                 return None
 
-            # Get next song from queue
-            if player.queue:
-                song = player.queue.popleft()
-            elif player.autoplay_enabled:
-                # Use pre-fetched autoplay queue first
-                if player.autoplay_queue:
-                    song = player.autoplay_queue.popleft()
-                elif player.current_song:
-                    # Fallback: fetch one song on-demand if queue is empty
-                    song = await self._get_autoplay_song(guild_id, player)
-                    if not song:
-                        self._start_disconnect_timer(guild_id, player)
-                        return None
-                else:
-                    player.current_song = None
-                    self._start_disconnect_timer(guild_id, player)
-                    return None
-            else:
-                # Nothing to play, start disconnect timer
-                player.current_song = None
-                self._start_disconnect_timer(guild_id, player)
+            song = await self._get_next_song(guild_id, player)
+            if not song:
                 return None
 
             # Play the song
@@ -163,25 +262,12 @@ class MusicPlayerManager:
                 while len(player.recent_songs) > RECENT_SONGS_LIMIT:
                     player.recent_songs.popleft()
 
-            # Use FFmpegPCMAudio + PCMVolumeTransformer for volume control
-            source = discord.FFmpegPCMAudio(
-                song.url,
-                before_options=FFMPEG_BEFORE_OPTIONS,
-                options=FFMPEG_OPTIONS,
-            )
-            source = discord.PCMVolumeTransformer(source, volume=player.volume)
+            source = await self._create_audio_source(song, player, guild_id)
+            if not source:
+                return None
 
-            def after_callback(error):
-                if error:
-                    print(f"Playback error: {error}")
-                # Schedule next song
-                if player.voice_client and player.voice_client.loop:
-                    asyncio.run_coroutine_threadsafe(
-                        self.play_next(guild_id),
-                        player.voice_client.loop,
-                    )
-
-            player.voice_client.play(source, after=after_callback)
+            callback = self._make_after_callback(song, player, guild_id, source)
+            player.voice_client.play(source, after=callback)
 
             # Track playback timing
             player.song_start_time = time.time()
@@ -192,7 +278,26 @@ class MusicPlayerManager:
             if player.autoplay_enabled:
                 self._start_prefetch(guild_id, player)
 
+            # Pre-download next song(s) in queue for seamless playback
+            self._prefetch_next_audio(player)
+
             return song
+
+    def _prefetch_next_audio(self, player: GuildPlayer) -> None:
+        """Start background download for next songs in queue."""
+        # Prefetch from regular queue first
+        for i, next_song in enumerate(player.queue):
+            if i >= 2:  # Only prefetch first 2
+                break
+            if not next_song.local_path and not audio_cache.is_ready(next_song.video_id):
+                audio_cache.start_background_download(next_song)
+
+        # Then from autoplay queue
+        for i, next_song in enumerate(player.autoplay_queue):
+            if i >= 1:  # Only prefetch 1 from autoplay
+                break
+            if not next_song.local_path and not audio_cache.is_ready(next_song.video_id):
+                audio_cache.start_background_download(next_song)
 
     async def _get_autoplay_song(self, guild_id: int, player: GuildPlayer) -> SongInfo | None:
         """Fetch a single song from autoplay recommendations (fallback)."""
@@ -253,18 +358,13 @@ class MusicPlayerManager:
         # Sort by guild ratings: positive first, neutral middle, heavily disliked last
         ratings = get_guild_ratings(guild_id)
 
+        # Thresholds: positive (>0) = group 0, neutral (0) = 1, disliked (-1) = 2, heavily disliked (<=-2) = 3
+        _GROUP_THRESHOLDS = [(1, 0), (0, 1), (-1, 2)]
+
         def rating_sort_key(rec: dict) -> tuple[int, int]:
             score = ratings.get(rec["videoId"], 0)
-            # Group: 0 = positive (score > 0), 1 = neutral (score == 0), 2 = disliked (score < 0 but > -2), 3 = heavily disliked (score <= -2)
-            if score > 0:
-                group = 0
-            elif score == 0:
-                group = 1
-            elif score > -2:
-                group = 2
-            else:
-                group = 3
-            return (group, -score)  # Within group, sort by score descending
+            group = next((g for threshold, g in _GROUP_THRESHOLDS if score >= threshold), 3)
+            return (group, -score)
 
         all_recs.sort(key=rating_sort_key)
         return all_recs[:limit]

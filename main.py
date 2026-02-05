@@ -115,6 +115,22 @@ async def ensure_voice(interaction: discord.Interaction) -> bool:
     return True
 
 
+def _log_music_event(interaction: discord.Interaction, song, source_type: str, action: str):
+    """Log a music audit event, extracting guild/user info from the interaction."""
+    guild_name = interaction.guild.name if interaction.guild else "DM"
+    AuditLogger.log_music(
+        interaction.guild_id,
+        guild_name,
+        interaction.user.id,
+        str(interaction.user),
+        song.video_id,
+        song.title,
+        song.duration,
+        source_type,
+        action,
+    )
+
+
 def get_tts_error_message(error: Exception) -> str:
     """Get a user-friendly error message for TTS exceptions."""
     from voice_agent import TTSConnectionError, TTSGenerationError
@@ -183,13 +199,10 @@ async def play(interaction: discord.Interaction, query: str):
             await player_manager.play_next(guild_id)
         return
 
-    # Check if query is a video ID (11 chars, from autocomplete)
-    if len(query) == 11 and not query.startswith("http"):
-        song = await extract_song_info(query)
-    elif query.startswith("http"):
+    # Video ID from autocomplete (11 chars) or direct URL → extract directly; otherwise search
+    if query.startswith("http") or len(query) == 11:
         song = await extract_song_info(query)
     else:
-        # Search YouTube
         song = await search_youtube(query)
 
     if not song:
@@ -200,18 +213,8 @@ async def play(interaction: discord.Interaction, query: str):
     position = await player_manager.add_to_queue(guild_id, song)
 
     # Log music event
-    guild_name = interaction.guild.name if interaction.guild else "DM"
-    AuditLogger.log_music(
-        guild_id,
-        guild_name,
-        interaction.user.id,
-        str(interaction.user),
-        song.video_id,
-        song.title,
-        song.duration,
-        "search" if not query.startswith("http") else "url",
-        "play",
-    )
+    source_type = "url" if query.startswith("http") else "search"
+    _log_music_event(interaction, song, source_type, "play")
 
     # Start playing if not already
     if not player_manager.is_playing(guild_id):
@@ -257,11 +260,7 @@ async def skip(interaction: discord.Interaction):
 
     if player_manager.skip(guild_id):
         if current:
-            guild_name = interaction.guild.name if interaction.guild else "DM"
-            AuditLogger.log_music(
-                guild_id, guild_name, interaction.user.id, str(interaction.user),
-                current.video_id, current.title, current.duration, "queue", "skip"
-            )
+            _log_music_event(interaction, current, "queue", "skip")
         await interaction.response.send_message("Skipped!")
     else:
         await interaction.response.send_message("Nothing is playing.", ephemeral=True)
@@ -275,11 +274,7 @@ async def stop(interaction: discord.Interaction):
     current = player_manager.get_current_song(guild_id)
 
     if current:
-        guild_name = interaction.guild.name if interaction.guild else "DM"
-        AuditLogger.log_music(
-            guild_id, guild_name, interaction.user.id, str(interaction.user),
-            current.video_id, current.title, current.duration, "queue", "stop"
-        )
+        _log_music_event(interaction, current, "queue", "stop")
 
     await player_manager.disconnect(guild_id)
     await interaction.response.send_message("Stopped and disconnected.")

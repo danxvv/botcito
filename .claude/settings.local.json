@@ -18,7 +18,8 @@
       "Bash(uv run python:*)",
       "WebSearch",
       "Bash(find:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(uv pip install:*)"
     ]
   }
 }
