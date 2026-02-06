@@ -36,7 +36,12 @@ _YDL_OPTIONS_PLAYLIST = {
     # Enable remote EJS challenge solver scripts
     "remote_components": {"ejs:github": {}},
     # Use TV client which tends to work better
-    "extractor_args": {"youtube": {"player_client": ["tv", "web"]}},
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["tv", "web"],
+            "player_js_variant": ["tv"],
+        }
+    },
 }
 
 # User-Agent to use for requests (needed for FFmpeg too)
@@ -54,14 +59,17 @@ _YDL_OPTIONS_SINGLE = {
     "no_warnings": False,
     # Add http headers to help with 403 issues
     "http_headers": {"User-Agent": _USER_AGENT},
-    # Force fresh extraction (no caching of potentially stale URLs)
-    "cachedir": False,
     # Enable multiple JS runtimes as fallback
     "js_runtimes": {"deno": {}, "node": {}, "bun": {}},
     # Enable remote EJS challenge solver scripts
     "remote_components": {"ejs:github": {}},
     # Use TV client which tends to work better with cookies
-    "extractor_args": {"youtube": {"player_client": ["tv", "web"]}},
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["tv", "web"],
+            "player_js_variant": ["tv"],
+        }
+    },
 }
 
 # Thread pool for running blocking yt-dlp operations
