@@ -14,7 +14,7 @@ MAX_TOOL_CALLS_FROM_HISTORY = 5  # Limit tool calls in context to manage size
 MCP_CONNECT_TIMEOUT_SECONDS = 30.0
 
 # Team leader model - Claude Sonnet for better routing decisions
-TEAM_LEADER_MODEL = "anthropic/claude-sonnet-4.5"
+TEAM_LEADER_MODEL = "moonshotai/kimi-k2.5"
 
 # Exa MCP configuration
 EXA_MCP_BASE_URL = "https://mcp.exa.ai/mcp"

@@ -7,7 +7,7 @@ requires-python = ">=3.10"
 dependencies = [
     "discord.py[voice]>=2.6.0,<3.0.0",
     "discord-ext-voice-recv>=0.5.0",
-    "yt-dlp>=2025.1.0",
+    "yt-dlp>=2026.2.4",
     "ytmusicapi>=1.11.0,<2.0.0",
     "python-dotenv>=1.0.0,<2.0.0",
     "agno>=2.3.26",
@@ -16,6 +16,8 @@ dependencies = [
     "openai>=2.15.0",
     "textual>=7.3.0",
     "qwen-tts>=0.1.0",
+    "torch>=2.7.0",
+    "torchaudio>=2.7.0",
 ]
 
 [project.scripts]
@@ -23,6 +25,15 @@ audit = "audit:run_audit"
 
 [tool.uv]
 package = true
+
+[[tool.uv.index]]
+name = "pytorch-nightly-cu128"
+url = "https://download.pytorch.org/whl/nightly/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-nightly-cu128" }
+torchaudio = { index = "pytorch-nightly-cu128" }
 
 [build-system]
 requires = ["setuptools>=61.0"]

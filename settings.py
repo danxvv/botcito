@@ -16,7 +16,8 @@ AVAILABLE_MODELS = [
     "google/gemini-3-pro-preview",
     "anthropic/claude-sonnet-4.5",
     "anthropic/claude-haiku-4.5",
-    "google/gemini-3-flash-preview"
+    "google/gemini-3-flash-preview",
+    "minimax/minimax-m2-her",
 ]
 
 DEFAULT_MODEL = "google/gemini-3-flash-preview"

@@ -2,23 +2,42 @@
 
 import json
 import os
+import re
 import threading
 import uuid
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from .tts import TTSProvider
 
 DEFAULT_QWEN_SETTINGS_PATH = "data/tts_settings.json"
 DEFAULT_QWEN_OUTPUT_DIR = "data/voice/tts"
-DEFAULT_CUSTOM_MODEL = "Qwen/Qwen3-TTS-0.6B"
-DEFAULT_BASE_MODEL = "Qwen/Qwen3-TTS-0.6B-Base"
+DEFAULT_CUSTOM_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+DEFAULT_BASE_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+
+DEFAULT_MAX_NEW_TOKENS = 2048
+DEFAULT_CHUNK_MAX_CHARS = 200
+BATCH_SIZE = 8
+
+SUPPORTED_SPEAKERS = {
+    "aiden",
+    "dylan",
+    "eric",
+    "ono_anna",
+    "ryan",
+    "serena",
+    "sohee",
+    "uncle_fu",
+    "vivian",
+}
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "mode": "custom_voice",
     "custom_voice": {
         "model": DEFAULT_CUSTOM_MODEL,
-        "speaker": "Cherry",
+        "speaker": "Vivian",
         "language": "Auto",
     },
     "base_clone": {
@@ -28,10 +47,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "language": "Auto",
     },
     "generation": {
-        "cfg_strength": 0.5,
-        "seed": 0,
+        "max_new_tokens": DEFAULT_MAX_NEW_TOKENS,
+        "chunk_max_chars": DEFAULT_CHUNK_MAX_CHARS,
     },
 }
+
+# Regex to split text at sentence boundaries while keeping delimiters attached.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?;。！？；\n])\s+")
 
 ISO_LANGUAGE_MAP = {
     "zh": "Chinese",
@@ -188,15 +210,6 @@ class Qwen3TTSProvider(TTSProvider):
                 "Invalid `mode` in Qwen TTS settings. Use `custom_voice` or `base_clone`."
             )
 
-        generation = data.get("generation", {})
-        if generation and not isinstance(generation, dict):
-            raise QwenTTSConfigurationError("`generation` must be an object if provided.")
-
-        if "cfg_strength" in generation and not isinstance(generation["cfg_strength"], (int, float)):
-            raise QwenTTSConfigurationError("`generation.cfg_strength` must be a number.")
-        if "seed" in generation and not isinstance(generation["seed"], int):
-            raise QwenTTSConfigurationError("`generation.seed` must be an integer.")
-
         mode_config = data.get(mode, {})
         if not isinstance(mode_config, dict):
             raise QwenTTSConfigurationError(f"`{mode}` settings must be an object.")
@@ -234,16 +247,52 @@ class Qwen3TTSProvider(TTSProvider):
             return path
         return _repo_root() / path
 
-    def _generation_kwargs(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Extract generation kwargs from config."""
+    @staticmethod
+    def _generation_kwargs(settings: dict[str, Any]) -> dict[str, Any]:
+        """Extract generation kwargs (max_new_tokens) from config."""
         generation = settings.get("generation", {})
         kwargs: dict[str, Any] = {}
-
-        if "cfg_strength" in generation:
-            kwargs["cfg_strength"] = float(generation["cfg_strength"])
-        if "seed" in generation:
-            kwargs["seed"] = int(generation["seed"])
+        if "max_new_tokens" in generation:
+            kwargs["max_new_tokens"] = int(generation["max_new_tokens"])
+        else:
+            kwargs["max_new_tokens"] = DEFAULT_MAX_NEW_TOKENS
         return kwargs
+
+    @staticmethod
+    def _chunk_text(text: str, max_chars: int) -> list[str]:
+        """Split long text into sentence-aligned chunks under *max_chars*.
+
+        Strategy:
+        1. Split at sentence-ending punctuation (.!?; and CJK equivalents).
+        2. Greedily merge consecutive sentences until adding the next one
+           would exceed *max_chars*.
+        3. Any single sentence longer than *max_chars* is kept as-is (the
+           model can still handle it, just slightly less efficiently).
+        """
+        if len(text) <= max_chars:
+            return [text]
+
+        sentences = _SENTENCE_SPLIT_RE.split(text)
+        # Filter out empty strings from the split.
+        sentences = [s for s in sentences if s.strip()]
+        if not sentences:
+            return [text]
+
+        chunks: list[str] = []
+        current = sentences[0]
+
+        for sentence in sentences[1:]:
+            candidate = f"{current} {sentence}"
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                chunks.append(current)
+                current = sentence
+
+        if current:
+            chunks.append(current)
+
+        return chunks
 
     def _ensure_model(self, model_name: str):
         """Load Qwen model lazily and switch if model config changes."""
@@ -292,17 +341,77 @@ class Qwen3TTSProvider(TTSProvider):
             safe_name = f"{uuid.uuid4().hex}.wav"
         return self.output_dir / safe_name
 
+    def _synthesize_chunks_custom_voice(
+        self,
+        model: Any,
+        chunks: list[str],
+        language: str,
+        speaker: str,
+        gen_kwargs: dict[str, Any],
+    ) -> tuple[list[Any], int]:
+        """Run batched custom_voice generation over text chunks."""
+        all_wavs: list[Any] = []
+        sample_rate = 0
+
+        for i in range(0, len(chunks), BATCH_SIZE):
+            batch = chunks[i : i + BATCH_SIZE]
+            wavs, sr = model.generate_custom_voice(
+                text=batch,
+                language=[language] * len(batch),
+                speaker=[speaker] * len(batch),
+                **gen_kwargs,
+            )
+            all_wavs.extend(wavs)
+            sample_rate = sr
+
+        return all_wavs, sample_rate
+
+    def _synthesize_chunks_voice_clone(
+        self,
+        model: Any,
+        chunks: list[str],
+        language: str,
+        ref_audio: str,
+        ref_text: str,
+        gen_kwargs: dict[str, Any],
+    ) -> tuple[list[Any], int]:
+        """Run batched voice_clone generation over text chunks."""
+        all_wavs: list[Any] = []
+        sample_rate = 0
+
+        for i in range(0, len(chunks), BATCH_SIZE):
+            batch = chunks[i : i + BATCH_SIZE]
+            wavs, sr = model.generate_voice_clone(
+                text=batch,
+                language=[language] * len(batch),
+                ref_audio=ref_audio,
+                ref_text=ref_text,
+                **gen_kwargs,
+            )
+            all_wavs.extend(wavs)
+            sample_rate = sr
+
+        return all_wavs, sample_rate
+
     def generate_speech(
         self, text: str, filename: str | None = None, *, language: str | None = None
     ) -> Path:
-        """Generate speech from text using local Qwen models."""
+        """Generate speech from text using local Qwen models.
+
+        Long texts are automatically split into sentence-aligned chunks and
+        synthesized via batch inference for better speed, then concatenated
+        into a single audio file.
+        """
         if not text.strip():
             raise ValueError("Text cannot be empty")
 
         settings = self._load_settings()
         mode = settings.get("mode", "custom_voice")
         mode_config = settings.get(mode, {})
-        generation_kwargs = self._generation_kwargs(settings)
+        gen_kwargs = self._generation_kwargs(settings)
+
+        generation = settings.get("generation", {})
+        chunk_max_chars = int(generation.get("chunk_max_chars", DEFAULT_CHUNK_MAX_CHARS))
 
         model_name = mode_config.get(
             "model",
@@ -314,24 +423,20 @@ class Qwen3TTSProvider(TTSProvider):
         normalized_language = _normalize_language(language or mode_config.get("language"))
         model = self._ensure_model(model_name)
 
+        chunks = self._chunk_text(text.strip(), chunk_max_chars)
+
         try:
             if mode == "custom_voice":
                 speaker = mode_config["speaker"].strip()
-                wavs, sample_rate = model.generate_custom_voice(
-                    text=text,
-                    language=normalized_language,
-                    speaker=speaker,
-                    **generation_kwargs,
+                all_wavs, sample_rate = self._synthesize_chunks_custom_voice(
+                    model, chunks, normalized_language, speaker, gen_kwargs,
                 )
             elif mode == "base_clone":
                 reference_audio = self._resolve_audio_path(mode_config["reference_audio_path"])
                 reference_text = mode_config["reference_text"].strip()
-                wavs, sample_rate = model.generate_voice_clone(
-                    text=text,
-                    language=normalized_language,
-                    ref_audio=str(reference_audio),
-                    ref_text=reference_text,
-                    **generation_kwargs,
+                all_wavs, sample_rate = self._synthesize_chunks_voice_clone(
+                    model, chunks, normalized_language,
+                    str(reference_audio), reference_text, gen_kwargs,
                 )
             else:
                 raise QwenTTSConfigurationError(
@@ -342,13 +447,19 @@ class Qwen3TTSProvider(TTSProvider):
         except Exception as e:
             raise QwenTTSRuntimeError(f"Qwen TTS generation failed: {e}") from e
 
-        if not wavs:
+        if not all_wavs:
             raise QwenTTSRuntimeError("Qwen TTS did not return any audio samples.")
+
+        # Concatenate all chunk waveforms into a single audio array.
+        if len(all_wavs) == 1:
+            combined = all_wavs[0]
+        else:
+            combined = np.concatenate(all_wavs, axis=0)
 
         output_path = self._build_output_path(filename)
         _, sf, _ = self._import_runtime()
         try:
-            sf.write(str(output_path), wavs[0], sample_rate)
+            sf.write(str(output_path), combined, sample_rate)
         except Exception as e:
             raise QwenTTSRuntimeError(f"Failed to write generated audio file: {e}") from e
 
