@@ -4,10 +4,11 @@ import atexit
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from pathlib import Path
 
 import yt_dlp
 from yt_dlp.utils import DownloadError, ExtractorError
+
+from ytdlp_config import get_cookies_file
 
 
 @dataclass
@@ -47,9 +48,6 @@ _YDL_OPTIONS_PLAYLIST = {
 # User-Agent to use for requests (needed for FFmpeg too)
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-# Cookie file path (place cookies.txt in project root to use)
-_COOKIES_FILE = Path(__file__).parent / "cookies.txt"
-
 # yt-dlp options for single video extraction
 _YDL_OPTIONS_SINGLE = {
     # Prefer audio-only, fallback to best available (let FFmpeg handle transcoding)
@@ -80,12 +78,11 @@ atexit.register(_executor.shutdown, wait=False)
 def _get_options(playlist: bool = False) -> dict:
     """Get yt-dlp options with cookies if available."""
     opts = dict(_YDL_OPTIONS_PLAYLIST if playlist else _YDL_OPTIONS_SINGLE)
-    if _COOKIES_FILE.exists():
-        opts["cookiefile"] = str(_COOKIES_FILE)
-        print(f"[DEBUG] Using cookies from: {_COOKIES_FILE}")
+    cookies_file = get_cookies_file()
+    if cookies_file.exists():
+        opts["cookiefile"] = str(cookies_file)
+        print(f"[DEBUG] Using cookies from: {cookies_file}")
     return opts
-
-
 def _extract_info(url: str, *, playlist: bool = False) -> dict | None:
     """Extract info from URL (blocking operation)."""
     opts = _get_options(playlist)
