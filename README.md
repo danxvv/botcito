@@ -51,14 +51,34 @@ A feature-rich Discord music bot with YouTube playback, smart autoplay recommend
    TTS_SETTINGS_PATH=data/tts_settings.json
 
    # Optional Chatterbox MCP config
-   TTS_MCP_URL=http://127.0.0.1:8080/mcp
-   TTS_DEFAULT_LANGUAGE=es
-   ```
+    TTS_MCP_URL=http://127.0.0.1:8080/mcp
+    TTS_DEFAULT_LANGUAGE=es
+
+    # Optional - for VPS/server YouTube auth issues
+    YT_DLP_COOKIES_FILE=/absolute/path/to/cookies.txt
+    ```
 
 4. **Run the bot**
    ```bash
    uv run python main.py
    ```
+
+### VPS / Server yt-dlp Authentication
+
+Some VPS providers or remote servers may trigger YouTube auth checks that make yt-dlp fail unless cookies are provided.
+
+This bot will automatically use:
+
+- `YT_DLP_COOKIES_FILE` if it is set
+- otherwise `./cookies.txt` in the project directory if that file exists
+
+Example:
+
+```bash
+YT_DLP_COOKIES_FILE=/opt/bot/secrets/youtube-cookies.txt
+```
+
+This is useful when deploying with Docker volumes, VPS secret mounts, or any setup where the cookies file should live outside the repository.
 
 ## Commands
 

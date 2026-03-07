@@ -3,6 +3,7 @@
 import asyncio
 import atexit
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -11,7 +12,7 @@ import yt_dlp
 logger = logging.getLogger(__name__)
 
 CACHE_DIR = Path("data/audio_cache")
-COOKIES_FILE = Path(__file__).parent / "cookies.txt"
+DEFAULT_COOKIES_FILE = Path(__file__).parent / "cookies.txt"
 MAX_CACHED_FILES = 10
 MAX_CACHE_SIZE_MB = 500
 DOWNLOAD_TIMEOUT = 60
@@ -65,11 +66,14 @@ class AudioCache:
             "remote_components": {"ejs:github": {}},
             "extractor_args": {"youtube": {"player_client": ["tv", "web"]}},
         }
-        if COOKIES_FILE.exists():
-            ydl_opts["cookiefile"] = str(COOKIES_FILE)
-            print(f"[DEBUG] Cache using cookies from: {COOKIES_FILE}")
+        cookies_file = Path(
+            os.getenv("YT_DLP_COOKIES_FILE", str(DEFAULT_COOKIES_FILE))
+        ).expanduser()
+        if cookies_file.exists():
+            ydl_opts["cookiefile"] = str(cookies_file)
+            print(f"[DEBUG] Cache using cookies from: {cookies_file}")
         else:
-            print(f"[DEBUG] No cookies file at: {COOKIES_FILE}")
+            print(f"[DEBUG] No cookies file at: {cookies_file}")
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([webpage_url])
