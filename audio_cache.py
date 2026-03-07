@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import yt_dlp
-from youtube import get_cookies_file
+from ytdlp_config import get_cookies_file
 
 logger = logging.getLogger(__name__)
 
