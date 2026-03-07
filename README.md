@@ -51,12 +51,12 @@ A feature-rich Discord music bot with YouTube playback, smart autoplay recommend
    TTS_SETTINGS_PATH=data/tts_settings.json
 
    # Optional Chatterbox MCP config
-    TTS_MCP_URL=http://127.0.0.1:8080/mcp
-    TTS_DEFAULT_LANGUAGE=es
+   TTS_MCP_URL=http://127.0.0.1:8080/mcp
+   TTS_DEFAULT_LANGUAGE=es
 
-    # Optional - for VPS/server YouTube auth issues
-    YT_DLP_COOKIES_FILE=/absolute/path/to/cookies.txt
-    ```
+   # Optional - for VPS/server YouTube auth issues
+   YT_DLP_COOKIES_FILE=/absolute/path/to/cookies.txt
+   ```
 
 4. **Run the bot**
    ```bash

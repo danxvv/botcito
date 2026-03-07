@@ -48,7 +48,7 @@ _YDL_OPTIONS_PLAYLIST = {
 # User-Agent to use for requests (needed for FFmpeg too)
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-_DEFAULT_COOKIES_FILE = Path(__file__).parent / "cookies.txt"
+_FALLBACK_COOKIES_FILE = Path(__file__).parent / "cookies.txt"
 
 # yt-dlp options for single video extraction
 _YDL_OPTIONS_SINGLE = {
@@ -80,13 +80,18 @@ atexit.register(_executor.shutdown, wait=False)
 def _get_options(playlist: bool = False) -> dict:
     """Get yt-dlp options with cookies if available."""
     opts = dict(_YDL_OPTIONS_PLAYLIST if playlist else _YDL_OPTIONS_SINGLE)
-    cookies_file = Path(
-        os.getenv("YT_DLP_COOKIES_FILE", str(_DEFAULT_COOKIES_FILE))
-    ).expanduser()
+    cookies_file = get_cookies_file()
     if cookies_file.exists():
         opts["cookiefile"] = str(cookies_file)
         print(f"[DEBUG] Using cookies from: {cookies_file}")
     return opts
+
+
+def get_cookies_file() -> Path:
+    """Return the configured yt-dlp cookies file path."""
+    return Path(
+        os.getenv("YT_DLP_COOKIES_FILE", str(_FALLBACK_COOKIES_FILE))
+    ).expanduser()
 
 
 def _extract_info(url: str, *, playlist: bool = False) -> dict | None:
