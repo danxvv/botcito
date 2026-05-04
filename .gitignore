@@ -12,8 +12,20 @@ wheels/
 # Environment variables
 .env
 
+# Cookies / credentials
+cookies.txt
+
 # Database files
 data/
+
+# Media files
+*.webm
+*.mp3
+*.mp4
+*.opus
+*.ogg
+*.wav
+*.m4a
 
 # IDE and tools
 .claude/

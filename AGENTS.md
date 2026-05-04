@@ -4,8 +4,8 @@ Guidance for coding agents working in this `discordbotcito` repository.
 
 ## Project Snapshot
 
-- Discord bot focused on music playback, autoplay recommendations, recording, and AI assistant features.
-- Python 3.10+ codebase with heavy async usage (`discord.py`, `yt-dlp`, SQLite, Agno).
+- Discord bot focused on music playback, autoplay recommendations, recording, ratings, and audit logging.
+- Python 3.10+ codebase with heavy async usage (`discord.py`, `yt-dlp`, SQLite).
 - Package/dependency workflow uses `uv` (prefer `uv` for all Python commands).
 
 ## Build, Run, and Verification Commands
@@ -61,10 +61,6 @@ Environment variables (`.env`):
 
 ```env
 DISCORD_TOKEN=your_bot_token_here
-
-# Optional /guide feature:
-EXA_API_KEY=your_exa_api_key
-OPENROUTER_API_KEY=your_openrouter_api_key
 ```
 
 ## Repository Layout (Key Areas)
@@ -73,10 +69,7 @@ OPENROUTER_API_KEY=your_openrouter_api_key
 - `music_player.py`: per-guild player state, queue logic, autoplay, voice connection handling.
 - `youtube.py`: async wrappers around blocking `yt-dlp` extraction.
 - `autoplay.py`: YouTube Music recommendation logic.
-- `voice_agent/`: voice conversation orchestration and TTS abstraction.
-- `game_agent/`: AI assistant, session context, MCP connection management.
 - `audit/`: audit database + textual TUI viewer.
-- `settings.py`: SQLite-backed model/settings storage.
 
 ## Code Style and Conventions
 
@@ -84,7 +77,7 @@ OPENROUTER_API_KEY=your_openrouter_api_key
 
 - Keep import groups in this order: standard library, third-party, local modules.
 - Use a blank line between import groups (matches current files).
-- Prefer relative imports inside packages (for example inside `game_agent/`, `audit/`, `voice_agent/`).
+- Prefer relative imports inside packages (for example inside `audit/`).
 
 ### Formatting
 
@@ -139,9 +132,7 @@ OPENROUTER_API_KEY=your_openrouter_api_key
 
 - SQLite files are created under `data/` at runtime.
 - Important DB files:
-  - `data/settings.db`
   - `data/audit.db`
-  - `data/agent_memory.db`
 
 ## Agent Workflow Recommendations
 

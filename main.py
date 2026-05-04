@@ -22,9 +22,6 @@ class MusicBot(discord.Client):
         intents.voice_states = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
-        self._game_agent = None
-        self._voice_conversation = None
-        self._music_discovery_agent = None
 
     async def setup_hook(self):
         """Register commands and sync on startup."""
@@ -33,58 +30,6 @@ class MusicBot(discord.Client):
         setup_commands(self)
         await self.tree.sync()
         print(f"Synced {len(self.tree.get_commands())} commands")
-
-    def get_game_agent(self):
-        """Get or create the game agent singleton."""
-        if self._game_agent is None:
-            from game_agent import GameAgent
-
-            self._game_agent = GameAgent()
-        return self._game_agent
-
-    def get_voice_conversation(self):
-        """Get or create the voice conversation manager singleton."""
-        if self._voice_conversation is None:
-            from voice_agent import (
-                ChatterboxTTSProvider,
-                Qwen3TTSProvider,
-                VoiceConversation,
-                get_qwen_tts_settings_path,
-                get_tts_config,
-            )
-
-            agent = self.get_game_agent()
-            provider_name = os.getenv("TTS_PROVIDER", "qwen").strip().lower()
-
-            if provider_name == "qwen":
-                tts_provider = Qwen3TTSProvider(
-                    settings_path=get_qwen_tts_settings_path()
-                )
-            elif provider_name == "chatterbox":
-                mcp_url, language = get_tts_config()
-                tts_provider = ChatterboxTTSProvider(
-                    mcp_url=mcp_url,
-                    default_language=language,
-                )
-            else:
-                raise ValueError(
-                    "Invalid TTS_PROVIDER value. Use `qwen` or `chatterbox`."
-                )
-
-            self._voice_conversation = VoiceConversation(
-                game_agent=agent,
-                player_manager=player_manager,
-                tts_provider=tts_provider,
-            )
-        return self._voice_conversation
-
-    def get_music_discovery_agent(self):
-        """Get or create the music discovery agent singleton."""
-        if self._music_discovery_agent is None:
-            from music_agent import MusicDiscoveryAgent
-
-            self._music_discovery_agent = MusicDiscoveryAgent()
-        return self._music_discovery_agent
 
 
 client = MusicBot()
@@ -111,10 +56,6 @@ async def on_voice_state_update(
     if member.id == client.user.id and after.channel is None and before.channel:
         guild_id = before.channel.guild.id
         player = player_manager.get_player(guild_id)
-
-        # Stop voice conversation if active
-        if client._voice_conversation and client._voice_conversation.is_active(guild_id):
-            client._voice_conversation.stop(guild_id)
 
         # Save recording if active before cleanup
         if player.recording_session and player.audio_sink:

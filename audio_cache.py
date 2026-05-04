@@ -8,10 +8,11 @@ from pathlib import Path
 
 import yt_dlp
 
+from youtube import COOKIES_FILE, HTTP_HEADERS, YTDLP_AUDIO_FORMAT
+
 logger = logging.getLogger(__name__)
 
 CACHE_DIR = Path("data/audio_cache")
-COOKIES_FILE = Path(__file__).parent / "cookies.txt"
 MAX_CACHED_FILES = 10
 MAX_CACHE_SIZE_MB = 500
 DOWNLOAD_TIMEOUT = 60
@@ -52,24 +53,20 @@ class AudioCache:
                 pass
 
         output_template = str(self.cache_dir / video_id)
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         ydl_opts = {
-            "format": "251/250/249/140/139/bestaudio/best",
+            "format": YTDLP_AUDIO_FORMAT,
             "outtmpl": output_template,
             "noplaylist": True,
-            "quiet": False,
-            "no_warnings": False,
-            "http_headers": {"User-Agent": user_agent},
+            "quiet": True,
+            "no_warnings": True,
+            "http_headers": HTTP_HEADERS,
             "cachedir": False,
             "js_runtimes": {"deno": {}, "node": {}, "bun": {}},
-            "remote_components": {"ejs:github": {}},
-            "extractor_args": {"youtube": {"player_client": ["tv", "web"]}},
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
         }
         if COOKIES_FILE.exists():
             ydl_opts["cookiefile"] = str(COOKIES_FILE)
-            print(f"[DEBUG] Cache using cookies from: {COOKIES_FILE}")
-        else:
-            print(f"[DEBUG] No cookies file at: {COOKIES_FILE}")
+            logger.debug("Cache using yt-dlp cookies from %s", COOKIES_FILE)
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([webpage_url])

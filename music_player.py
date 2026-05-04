@@ -16,7 +16,7 @@ from audio_cache import audio_cache
 from autoplay import YouTubeMusicHandler
 from ratings import get_guild_ratings
 from voice_recorder import RecordingSession, WavAudioSink, save_recordings, get_recording_stats
-from youtube import SongInfo, extract_song_info
+from youtube import HTTP_HEADERS, SongInfo, extract_song_info
 
 
 # Number of recent songs to track for blended recommendations
@@ -45,17 +45,14 @@ class GuildPlayer:
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
-# FFmpeg options for reconnecting on network issues
-# Include User-Agent header to avoid 403 errors from YouTube
-
 def _get_ffmpeg_before_options() -> str:
-    """Build FFmpeg before_options with cookies if available."""
-    base_opts = (
+    """Build FFmpeg before_options for resilient network playback."""
+    headers = "".join(f"{name}: {value}\r\n" for name, value in HTTP_HEADERS.items())
+    return (
         "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
         "-reconnect_on_network_error 1 -reconnect_on_http_error 4xx,5xx "
-        '-headers "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\n"'
+        f'-headers "{headers}"'
     )
-    return base_opts
 
 FFMPEG_BEFORE_OPTIONS = _get_ffmpeg_before_options()
 # Output options for audio conversion
@@ -569,7 +566,7 @@ class MusicPlayerManager:
 
         return stats
 
-    # ============== Volume and TTS Playback Methods ==============
+    # ============== Volume and Local Audio Playback Methods ==============
 
     def set_volume(self, guild_id: int, volume: float) -> None:
         """
@@ -595,7 +592,7 @@ class MusicPlayerManager:
 
     async def play_audio_file(self, guild_id: int, file_path: str) -> bool:
         """
-        Play a local audio file (used for TTS). Waits for playback to complete.
+        Play a local audio file. Waits for playback to complete.
 
         Args:
             guild_id: Discord guild ID
@@ -618,7 +615,7 @@ class MusicPlayerManager:
 
         def after_callback(error):
             if error:
-                print(f"TTS playback error: {error}")
+                print(f"Local audio playback error: {error}")
             # Signal that playback is complete
             if player.voice_client and player.voice_client.loop:
                 player.voice_client.loop.call_soon_threadsafe(playback_done.set)

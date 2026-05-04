@@ -12,10 +12,8 @@
 | Ratings | `/like`, `/dislike` |
 | Stats | `/stats`, `/leaderboard` |
 | Recording | `/record`, `/stoprecord` |
-| Voice/TTS | `/talk`, `/stoptalk`, `/speak` |
-| AI | `/guide`, `/model` |
 
-The bot uses discord.py 2.6+, guild-scoped `GuildPlayer` state, FFmpeg+Opus streaming, yt-dlp for YouTube, ytmusicapi for autocomplete and recommendations, and an Agno-based game agent with Exa MCP for web search.
+The bot uses discord.py 2.6+, guild-scoped `GuildPlayer` state, FFmpeg+Opus streaming, yt-dlp for YouTube, and ytmusicapi for autocomplete and recommendations.
 
 ---
 

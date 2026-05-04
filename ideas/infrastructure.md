@@ -88,7 +88,7 @@ services:
 
 ### Complexity: Medium
 
-The main challenge is getting PyTorch + CUDA working in Docker (requires nvidia-container-toolkit for GPU TTS). A CPU-only variant would be straightforward. Consider providing both `Dockerfile` (CPU) and `Dockerfile.gpu` (CUDA) variants.
+The main challenge is getting GPU-accelerated audio processing working in Docker, which requires nvidia-container-toolkit. A CPU-only variant would be straightforward. Consider providing both `Dockerfile` (CPU) and `Dockerfile.gpu` (CUDA) variants.
 
 ---
 
@@ -201,14 +201,13 @@ Migrating is low-risk since structlog wraps stdlib logging seamlessly.
 
 ### Description
 
-Instrument the bot with Prometheus metrics to track operational health: songs played, queue lengths, voice connections, yt-dlp failures, FFmpeg errors, latency, and AI response times. Expose metrics via an HTTP endpoint for scraping.
+Instrument the bot with Prometheus metrics to track operational health: songs played, queue lengths, voice connections, yt-dlp failures, FFmpeg errors, and latency. Expose metrics via an HTTP endpoint for scraping.
 
 ### Value Proposition
 
 - **Proactive alerting**: Get notified when yt-dlp error rates spike (YouTube API changes), not when users complain.
 - **Capacity planning**: Track concurrent voice connections and queue sizes to understand growth patterns.
 - **Debugging**: Histograms of yt-dlp extraction time and FFmpeg startup time reveal performance regressions.
-- **AI cost tracking**: Count LLM API calls and track response latency per model.
 
 ### Suggested Tools & Libraries
 
@@ -236,7 +235,6 @@ ffmpeg_errors = Counter('bot_ffmpeg_errors_total', 'FFmpeg playback failures')
 
 # Latency metrics
 ytdlp_duration = Histogram('bot_ytdlp_duration_seconds', 'yt-dlp extraction time')
-ai_response_duration = Histogram('bot_ai_response_seconds', 'AI response latency', ['model'])
 
 # Start metrics server on a separate port
 start_http_server(9090)
@@ -259,8 +257,7 @@ Adding counters and gauges to existing code paths is straightforward. The main w
 
 ### Description
 
-The bot currently uses **three separate SQLite databases** with raw `sqlite3` connections:
-- `data/settings.db` -- Bot settings (LLM model preference)
+The bot currently uses separate SQLite databases with raw `sqlite3` connections:
 - `data/audit.db` -- Command and music audit logs
 - `data/ratings.db` -- Song ratings
 
@@ -307,7 +304,7 @@ This touches many modules (`settings.py`, `ratings.py`, `audit/database.py`, `au
 
 ### Description
 
-Add Redis for caching frequently-accessed data: YouTube Music recommendations, yt-dlp extraction results, and LLM responses. The bot currently uses in-memory caches (`OrderedDict` in `autoplay.py`, `dict` in `audio_cache.py`) that are lost on restart.
+Add Redis for caching frequently-accessed data: YouTube Music recommendations and yt-dlp extraction results. The bot currently uses in-memory caches (`OrderedDict` in `autoplay.py`, `dict` in `audio_cache.py`) that are lost on restart.
 
 ### Value Proposition
 
@@ -512,7 +509,7 @@ This also requires changing `MusicBot` to extend `commands.Bot` instead of `disc
 
 ### Complexity: Medium
 
-Each of the 5 command modules (`music`, `stats`, `recording`, `voice`, `guide`) needs to be wrapped in a Cog class. The logic stays the same; it is primarily a structural refactor.
+Each command module (`music`, `stats`, `recording`) needs to be wrapped in a Cog class. The logic stays the same; it is primarily a structural refactor.
 
 ---
 
@@ -520,11 +517,10 @@ Each of the 5 command modules (`music`, `stats`, `recording`, `voice`, `guide`) 
 
 ### Description
 
-Add per-user and per-guild rate limiting to prevent abuse (e.g., spamming `/play` commands, flooding the AI `/guide` endpoint). Currently, there is no rate limiting beyond Discord's built-in interaction rate limits.
+Add per-user and per-guild rate limiting to prevent abuse, such as spamming `/play` commands. Currently, there is no rate limiting beyond Discord's built-in interaction rate limits.
 
 ### Value Proposition
 
-- **Cost protection**: The `/guide` command calls paid LLM APIs. Unlimited use could generate unexpected bills.
 - **Fair usage**: Prevent one user from monopolizing the bot in a shared server.
 - **Stability**: Rapid-fire `/play` commands can overwhelm yt-dlp's ThreadPoolExecutor (max 3 workers).
 
@@ -546,34 +542,6 @@ async def play(interaction, query: str):
     ...
 ```
 
-**Custom rate limiter for the AI endpoint:**
-```python
-class RateLimiter:
-    def __init__(self, max_calls: int, period: float):
-        self.max_calls = max_calls
-        self.period = period
-        self.calls: dict[int, list[float]] = {}  # user_id -> timestamps
-
-    def is_allowed(self, user_id: int) -> bool:
-        now = time.time()
-        user_calls = self.calls.setdefault(user_id, [])
-        user_calls[:] = [t for t in user_calls if now - t < self.period]
-        if len(user_calls) >= self.max_calls:
-            return False
-        user_calls.append(now)
-        return True
-
-guide_limiter = RateLimiter(max_calls=5, period=60)  # 5 per minute
-```
-
-**Per-guild daily limits** for expensive operations (AI queries):
-```python
-# Using the existing audit database to count usage
-from audit.database import get_guild_command_count
-if get_guild_command_count(guild_id, hours=24) > 100:
-    return "Daily limit reached"
-```
-
 ### Complexity: Low
 
 ---
@@ -582,12 +550,12 @@ if get_guild_command_count(guild_id, hours=24) > 100:
 
 ### Description
 
-Allow changing bot configuration (LLM model, autoplay defaults, rate limits, volume defaults) without restarting. The bot currently reads settings from `.env` at startup and from SQLite for the LLM model. Other settings are hardcoded constants.
+Allow changing bot configuration (autoplay defaults, rate limits, volume defaults) without restarting. The bot currently reads settings from `.env` at startup. Other settings are hardcoded constants.
 
 ### Value Proposition
 
 - **Zero-downtime changes**: Adjust behavior without disconnecting active voice sessions.
-- **Experimentation**: Quickly test different LLM models, FFmpeg options, or cache sizes.
+- **Experimentation**: Quickly test different FFmpeg options or cache sizes.
 - **Ops-friendly**: Server administrators can tune the bot via Discord commands or the web dashboard.
 
 ### Suggested Tools & Libraries
@@ -596,7 +564,6 @@ Allow changing bot configuration (LLM model, autoplay defaults, rate limits, vol
 |------|---------|----------|
 | **watchfiles** (watchgod successor) | File system watcher for config changes | Mature, async-native |
 | **pydantic-settings** | Typed configuration with validation and env var loading | Very mature |
-| **Existing SQLite settings** | Already supports runtime changes via `/model` command | In-place |
 
 ### Implementation Approach
 
@@ -606,11 +573,9 @@ Allow changing bot configuration (LLM model, autoplay defaults, rate limits, vol
 
    class BotConfig(BaseSettings):
        discord_token: str
-       llm_model: str = "google/gemini-3-flash-preview"
        disconnect_timeout: int = 300
        max_queue_size: int = 100
        autoplay_prefetch_count: int = 3
-       tts_provider: str = "qwen"
 
        class Config:
            env_file = ".env"
@@ -618,7 +583,7 @@ Allow changing bot configuration (LLM model, autoplay defaults, rate limits, vol
 
 2. **Replace scattered constants** (like `DISCONNECT_TIMEOUT = 300`, `AUTOPLAY_PREFETCH_COUNT = 3` in `music_player.py`) with references to the config object.
 
-3. **Extend the existing `/model` command pattern** to support more settings: `/config set disconnect_timeout 600`.
+3. Add a configuration command pattern for runtime updates: `/config set disconnect_timeout 600`.
 
 ### Complexity: Low-Medium
 
@@ -751,7 +716,7 @@ alembic upgrade head
 
 ### Description
 
-Improve error handling across the bot with retry logic, circuit breakers, and better error reporting to users. Currently, errors in yt-dlp, FFmpeg, and AI responses are caught and logged but often result in silent failures (the user sees no feedback).
+Improve error handling across the bot with retry logic, circuit breakers, and better error reporting to users. Currently, errors in yt-dlp and FFmpeg are caught and logged but often result in silent failures (the user sees no feedback).
 
 ### Value Proposition
 
@@ -825,7 +790,7 @@ class CircuitBreaker:
 
 ### Description
 
-Add webhook support to send bot events (songs played, errors, AI responses) to external services like Slack, Telegram, or custom webhooks. This enables cross-platform notifications and integration with other tools.
+Add webhook support to send bot events (songs played and errors) to external services like Slack, Telegram, or custom webhooks. This enables cross-platform notifications and integration with other tools.
 
 ### Value Proposition
 
@@ -879,7 +844,7 @@ Based on the current state of the codebase, here is a suggested implementation o
 
 ### Quick Wins (Low effort, high impact)
 1. **Structured Logging** (#3) -- Replace print statements, immediate debugging improvement
-2. **Rate Limiting** (#10) -- Protect against AI API cost overruns
+2. **Rate Limiting** (#10) -- Prevent command abuse
 3. **Health Checks** (#12) -- Essential for any production deployment
 
 ### Medium-Term Improvements

@@ -329,27 +329,7 @@ This is architecturally non-trivial because the current design plays tracks sequ
 
 ---
 
-## 14. Audio Source Separation
-
-**Description:** Separate audio tracks into vocals, drums, bass, and other instruments using AI models. Useful for karaoke mode (remove vocals), instrumental playback, or isolated track listening.
-
-**Why it enhances the bot:** A karaoke mode (vocals removed) would be a standout feature. Instrumental versions of songs are frequently requested.
-
-**Python packages:**
-- **Spleeter** -- Deezer's open-source AI source separation tool. Pre-trained models for 2-stem (vocals/accompaniment), 4-stem (vocals/drums/bass/other), and 5-stem separation.
-  - PyPI: `spleeter` | GitHub: [deezer/spleeter](https://github.com/deezer/spleeter)
-- **demucs** -- Meta's music source separation model. Higher quality than Spleeter but more resource-intensive.
-  - PyPI: `demucs` | GitHub: [facebookresearch/demucs](https://github.com/facebookresearch/demucs)
-
-**Caveats:** Both libraries require significant CPU/GPU resources and processing time. Not suitable for real-time processing. Would need to download the track first, process it, then play the result. Processing a 3-minute song takes 30-60+ seconds on CPU.
-
-**Feasibility:** Medium -- The libraries work well but are resource-intensive. Not practical on low-end hosting. Would need a queueing/caching system for processed tracks.
-
-**Complexity:** High -- Download + process + cache pipeline, resource management, processing time UX (progress updates), and large model downloads (~300MB for Spleeter, ~1GB for demucs).
-
----
-
-## 15. Multi-Platform Search Aggregation
+## 14. Multi-Platform Search Aggregation
 
 **Description:** A unified `/search` command that searches across multiple platforms simultaneously (YouTube, SoundCloud, Spotify, Bandcamp) and presents results in a single embed with platform icons.
 
