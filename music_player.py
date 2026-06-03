@@ -1,21 +1,18 @@
-"""Music player with queue management, autoplay, auto-disconnect, and recording."""
+"""Music player with queue management, autoplay, and auto-disconnect."""
 
 import asyncio
 import random
 import subprocess
 import time
-import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
 
 import discord
-from discord.ext import voice_recv
 
+from audit.logger import AuditLogger
 from audio_cache import audio_cache
 from autoplay import YouTubeMusicHandler
 from ratings import get_guild_ratings
-from voice_recorder import RecordingSession, WavAudioSink, save_recordings, get_recording_stats
 from youtube import SongInfo, extract_song_info
 
 
@@ -30,15 +27,17 @@ class GuildPlayer:
     voice_client: discord.VoiceClient | None = None
     queue: deque[SongInfo] = field(default_factory=deque)
     current_song: SongInfo | None = None
+    guild_name: str = "Unknown"
     autoplay_enabled: bool = False
+    is_starting: bool = False
+    start_token: int = 0
+    stopping: bool = False
     song_start_time: float | None = None
     paused_at: float | None = None
     total_paused_time: float = 0.0
     ytmusic: YouTubeMusicHandler = field(default_factory=YouTubeMusicHandler)
     autoplay_queue: deque[SongInfo] = field(default_factory=deque)  # Pre-fetched autoplay songs
     recent_songs: deque[str] = field(default_factory=deque)  # Recent video IDs for blended recommendations
-    recording_session: RecordingSession | None = None
-    audio_sink: WavAudioSink | None = None
     volume: float = 1.0  # Volume level (0.0 to 1.0)
     _disconnect_task: asyncio.Task | None = field(default=None, repr=False)
     _prefetch_task: asyncio.Task | None = field(default=None, repr=False)
@@ -67,6 +66,9 @@ DISCONNECT_TIMEOUT = 300  # 5 minutes
 # Number of autoplay songs to keep pre-fetched
 AUTOPLAY_PREFETCH_COUNT = 3
 
+# Keep queues bounded so large playlists cannot exhaust memory.
+MAX_QUEUE_LENGTH = 200
+
 
 def _cancel_task(task: asyncio.Task | None) -> None:
     """Cancel a task if it exists and is not done."""
@@ -88,71 +90,138 @@ class MusicPlayerManager:
 
     async def connect(
         self, guild_id: int, channel: discord.VoiceChannel
-    ) -> voice_recv.VoiceRecvClient:
-        """Connect to a voice channel using VoiceRecvClient for recording support."""
+    ) -> discord.VoiceClient:
+        """Connect to a voice channel for music playback."""
         player = self.get_player(guild_id)
+        player.guild_name = channel.guild.name
+        player.stopping = False
 
         if player.voice_client and player.voice_client.is_connected():
             if player.voice_client.channel.id != channel.id:
                 await player.voice_client.move_to(channel)
             return player.voice_client
 
-        player.voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient)
+        player.voice_client = await channel.connect()
         return player.voice_client
 
-    async def disconnect(self, guild_id: int) -> dict | None:
-        """Disconnect from voice channel and clean up. Returns recording stats if was recording."""
+    async def disconnect(self, guild_id: int) -> None:
+        """Disconnect from voice channel and clean up."""
         player = self.get_player(guild_id)
         self._cancel_disconnect_timer(player)
         await self._cancel_prefetch(player)
 
-        # Save recording if active
-        recording_result = None
-        if player.recording_session and player.audio_sink:
-            recording_result = await self.stop_recording(guild_id)
+        async with player._lock:
+            player.stopping = True
+            songs = [s for s in [player.current_song, *player.queue, *player.autoplay_queue] if s]
+            voice_client = player.voice_client
+            player.queue.clear()
+            player.autoplay_queue.clear()
 
-        if player.voice_client:
-            if player.voice_client.is_playing():
-                player.voice_client.stop()
-            await player.voice_client.disconnect()
+        if voice_client:
+            if voice_client.is_playing() or voice_client.is_paused():
+                voice_client.stop()
+            if voice_client.is_connected():
+                await voice_client.disconnect()
+
+        for song in songs:
+            audio_cache.cancel(song.video_id)
+
+        async with player._lock:
             player.voice_client = None
+            player.current_song = None
+            player.recent_songs.clear()
+            player.song_start_time = None
+            player.paused_at = None
+            player.total_paused_time = 0.0
+            player.is_starting = False
+            player.stopping = False
+            player.ytmusic.clear_history()
 
-        player.queue.clear()
-        player.autoplay_queue.clear()
-        player.recent_songs.clear()
-        player.current_song = None
-        player.ytmusic.clear_history()
+    async def cleanup_external_disconnect(self, guild_id: int) -> None:
+        """Clear state after Discord disconnects the bot externally."""
+        player = self.get_player(guild_id)
+        self._cancel_disconnect_timer(player)
+        await self._cancel_prefetch(player)
 
-        # Clean up audio cache
-        audio_cache.cleanup_all()
+        async with player._lock:
+            player.stopping = True
+            songs = [s for s in [player.current_song, *player.queue, *player.autoplay_queue] if s]
+            player.voice_client = None
+            player.queue.clear()
+            player.autoplay_queue.clear()
+            player.recent_songs.clear()
+            player.current_song = None
+            player.song_start_time = None
+            player.paused_at = None
+            player.total_paused_time = 0.0
+            player.is_starting = False
+            player.stopping = False
+            player.ytmusic.clear_history()
 
-        return recording_result
+        for song in songs:
+            audio_cache.cancel(song.video_id)
 
-    async def add_to_queue(self, guild_id: int, song: SongInfo) -> int:
+    async def add_to_queue(
+        self,
+        guild_id: int,
+        song: SongInfo,
+        *,
+        requester_id: int = 0,
+        requester_name: str = "Autoplay",
+        guild_name: str = "Unknown",
+        source_type: str = "search",
+    ) -> int:
         """Add a song to the queue. Returns queue position."""
         player = self.get_player(guild_id)
-        player.queue.append(song)
-        return len(player.queue)
+        async with player._lock:
+            if len(player.queue) >= MAX_QUEUE_LENGTH:
+                return -1
+            song.requested_by_id = requester_id
+            song.requested_by_name = requester_name
+            song.guild_name = guild_name
+            song.source_type = source_type
+            player.queue.append(song)
+            return len(player.queue)
 
-    async def _get_next_song(self, guild_id: int, player: GuildPlayer) -> SongInfo | None:
-        """Get next song from queue or autoplay. Starts disconnect timer if nothing available."""
+    def _get_next_song(self, guild_id: int, player: GuildPlayer) -> SongInfo | None:
+        """Get next song from queue or pre-fetched autoplay."""
         if player.queue:
             return player.queue.popleft()
 
-        if player.autoplay_enabled:
-            if player.autoplay_queue:
-                return player.autoplay_queue.popleft()
-            if player.current_song:
-                song = await self._get_autoplay_song(guild_id, player)
-                if song:
-                    return song
+        if player.autoplay_enabled and player.autoplay_queue:
+            return player.autoplay_queue.popleft()
 
-        player.current_song = None
-        self._start_disconnect_timer(guild_id, player)
         return None
 
+    def _set_current_song(self, player: GuildPlayer, song: SongInfo) -> None:
+        """Update current song bookkeeping."""
+        player.current_song = song
+        player.ytmusic.mark_played(song.video_id)
+
+        if song.video_id not in player.recent_songs:
+            player.recent_songs.append(song.video_id)
+            while len(player.recent_songs) > RECENT_SONGS_LIMIT:
+                player.recent_songs.popleft()
+
+    def _log_play(self, guild_id: int, song: SongInfo) -> None:
+        """Write a play event after playback successfully starts."""
+        asyncio.create_task(
+            asyncio.to_thread(
+                AuditLogger.log_music,
+                guild_id,
+                song.guild_name,
+                song.requested_by_id,
+                song.requested_by_name,
+                song.video_id,
+                song.title,
+                song.duration,
+                song.source_type,
+                "play",
+            )
+        )
+
     async def _create_audio_source(
-        self, song: SongInfo, player: GuildPlayer, guild_id: int
+        self, song: SongInfo, player: GuildPlayer
     ) -> discord.PCMVolumeTransformer | None:
         """Create FFmpeg audio source from cached file or stream URL."""
         audio_source = None
@@ -172,7 +241,6 @@ class MusicPlayerManager:
             print(f"[DEBUG] URL starts with: {song.url[:80]}...")
             if not song.url or not song.url.startswith("http"):
                 print(f"[ERROR] Invalid URL for song: {song.title}")
-                self._start_disconnect_timer(guild_id, player)
                 return None
             audio_source = song.url
 
@@ -184,43 +252,19 @@ class MusicPlayerManager:
                 audio_source,
                 before_options=before_opts,
                 options=FFMPEG_OPTIONS,
-                stderr=subprocess.PIPE,  # Capture FFmpeg errors
+                stderr=subprocess.DEVNULL,
             )
         except Exception as e:
             print(f"[ERROR] Failed to create FFmpeg source: {e}")
-            self._start_disconnect_timer(guild_id, player)
             return None
 
         return discord.PCMVolumeTransformer(source, volume=player.volume)
 
-    def _make_after_callback(self, song: SongInfo, player: GuildPlayer, guild_id: int, source):
+    def _make_after_callback(self, song: SongInfo, player: GuildPlayer, guild_id: int):
         """Create the after-playback callback for voice client."""
         def after_callback(error):
-            # Check FFmpeg process status
-            ffmpeg_error = False
-            return_code = None
-            if hasattr(source, 'original') and hasattr(source.original, '_process'):
-                proc = source.original._process
-                if proc:
-                    return_code = proc.returncode
-                    # Non-zero return code indicates FFmpeg error
-                    if return_code and return_code != 0:
-                        ffmpeg_error = True
-                        # Read stderr if available
-                        stderr_output = ""
-                        if proc.stderr:
-                            try:
-                                stderr_output = proc.stderr.read().decode('utf-8', errors='replace')
-                            except Exception:
-                                pass
-                        print(f"[ERROR] FFmpeg crashed with code {return_code} for: {song.title}")
-                        if stderr_output:
-                            print(f"[ERROR] FFmpeg stderr: {stderr_output[:500]}")
-
             if error:
                 print(f"[ERROR] Playback error: {error}")
-            elif ffmpeg_error:
-                print(f"[ERROR] FFmpeg abnormal exit (code {return_code}) for: {song.title}")
             else:
                 print(f"[DEBUG] Playback finished for: {song.title}")
 
@@ -229,6 +273,9 @@ class MusicPlayerManager:
                 audio_cache.remove(song.video_id)
 
             # Schedule next song
+            if player.stopping:
+                return
+
             if player.voice_client and player.voice_client.loop:
                 asyncio.run_coroutine_threadsafe(
                     self.play_next(guild_id),
@@ -242,46 +289,95 @@ class MusicPlayerManager:
         player = self.get_player(guild_id)
 
         async with player._lock:
-            # Cancel any pending disconnect
-            self._cancel_disconnect_timer(player)
+            if player.is_starting:
+                return player.current_song
+            player.is_starting = True
+            player.start_token += 1
+            start_token = player.start_token
 
-            if not player.voice_client or not player.voice_client.is_connected():
-                return None
+        try:
+            while True:
+                async with player._lock:
+                    self._cancel_disconnect_timer(player)
 
-            song = await self._get_next_song(guild_id, player)
-            if not song:
-                return None
+                    if (
+                        player.stopping
+                        or not player.voice_client
+                        or not player.voice_client.is_connected()
+                    ):
+                        player.is_starting = False
+                        return None
 
-            # Play the song
-            player.current_song = song
-            player.ytmusic.mark_played(song.video_id)
+                    song = self._get_next_song(guild_id, player)
+                    needs_autoplay = (
+                        not song
+                        and player.autoplay_enabled
+                        and bool(player.current_song)
+                        and bool(player.recent_songs)
+                    )
 
-            # Track recent songs for blended recommendations
-            if song.video_id not in player.recent_songs:
-                player.recent_songs.append(song.video_id)
-                while len(player.recent_songs) > RECENT_SONGS_LIMIT:
-                    player.recent_songs.popleft()
+                    if song:
+                        self._set_current_song(player, song)
+                    elif not needs_autoplay:
+                        player.current_song = None
+                        player.is_starting = False
+                        self._start_disconnect_timer(guild_id, player)
+                        return None
 
-            source = await self._create_audio_source(song, player, guild_id)
-            if not source:
-                return None
+                if needs_autoplay:
+                    song = await self._get_autoplay_song(guild_id, player)
+                    if not song:
+                        async with player._lock:
+                            player.current_song = None
+                            player.is_starting = False
+                            self._start_disconnect_timer(guild_id, player)
+                        return None
 
-            callback = self._make_after_callback(song, player, guild_id, source)
-            player.voice_client.play(source, after=callback)
+                    async with player._lock:
+                        if player.stopping or not player.voice_client:
+                            player.is_starting = False
+                            return None
+                        self._set_current_song(player, song)
 
-            # Track playback timing
-            player.song_start_time = time.time()
-            player.paused_at = None
-            player.total_paused_time = 0.0
+                source = await self._create_audio_source(song, player)
+                if not source:
+                    async with player._lock:
+                        if player.current_song is song:
+                            player.current_song = None
+                    continue
 
-            # Pre-fetch autoplay songs in background if autoplay is enabled
-            if player.autoplay_enabled:
-                self._start_prefetch(guild_id, player)
+                async with player._lock:
+                    if (
+                        player.stopping
+                        or not player.voice_client
+                        or not player.voice_client.is_connected()
+                    ):
+                        player.is_starting = False
+                        return None
 
-            # Pre-download next song(s) in queue for seamless playback
-            self._prefetch_next_audio(player)
+                    if player.voice_client.is_playing() or player.voice_client.is_paused():
+                        player.is_starting = False
+                        return player.current_song
 
-            return song
+                    callback = self._make_after_callback(song, player, guild_id)
+                    player.voice_client.play(source, after=callback)
+
+                    player.song_start_time = time.time()
+                    player.paused_at = None
+                    player.total_paused_time = 0.0
+                    player.is_starting = False
+
+                    self._log_play(guild_id, song)
+
+                    if player.autoplay_enabled:
+                        self._start_prefetch(guild_id, player)
+
+                    self._prefetch_next_audio(player)
+                    return song
+        finally:
+            async with player._lock:
+                if player.is_starting and player.start_token == start_token:
+                    player.is_starting = False
 
     def _prefetch_next_audio(self, player: GuildPlayer) -> None:
         """Start background download for next songs in queue."""
@@ -305,11 +401,13 @@ class MusicPlayerManager:
             return None
 
         # Use blended recommendations from recent songs
-        recommendations = self._get_blended_recommendations(guild_id, player, limit=5)
+        recommendations = await self._get_blended_recommendations(guild_id, player, limit=5)
 
         for rec in recommendations:
             song = await extract_song_info(rec["videoId"])
             if song:
+                song.guild_name = player.guild_name
+                song.source_type = "autoplay"
                 return song
 
         return None
@@ -336,7 +434,7 @@ class MusicPlayerManager:
                 pass
             player._prefetch_task = None
 
-    def _get_blended_recommendations(
+    async def _get_blended_recommendations(
         self, guild_id: int, player: GuildPlayer, limit: int
     ) -> list[dict]:
         """Get blended recommendations from recent songs, sorted by guild ratings."""
@@ -349,7 +447,9 @@ class MusicPlayerManager:
         # Get recommendations from each recent song (most recent first)
         per_song_limit = max(limit // len(player.recent_songs), 2)
         for video_id in reversed(player.recent_songs):
-            recs = player.ytmusic.get_recommendations(video_id, limit=per_song_limit + 2)
+            recs = await player.ytmusic.get_recommendations_async(
+                video_id, limit=per_song_limit + 2
+            )
             for rec in recs:
                 if rec["videoId"] not in seen_ids:
                     seen_ids.add(rec["videoId"])
@@ -377,7 +477,7 @@ class MusicPlayerManager:
             return
 
         # Get blended recommendations from recent songs (sorted by ratings)
-        recommendations = self._get_blended_recommendations(
+        recommendations = await self._get_blended_recommendations(
             guild_id, player, limit=count + 2  # Get extra in case some fail
         )
 
@@ -392,9 +492,12 @@ class MusicPlayerManager:
 
             song = await extract_song_info(rec["videoId"])
             if song:
+                song.guild_name = player.guild_name
+                song.source_type = "autoplay"
                 async with player._lock:
-                    player.autoplay_queue.append(song)
-                fetched += 1
+                    if not player.stopping and player.voice_client:
+                        player.autoplay_queue.append(song)
+                        fetched += 1
 
     def _start_disconnect_timer(self, guild_id: int, player: GuildPlayer) -> None:
         """Start the auto-disconnect timer."""
@@ -404,19 +507,23 @@ class MusicPlayerManager:
         if player.voice_client:
             async def disconnect_after_timeout():
                 await asyncio.sleep(DISCONNECT_TIMEOUT)
+                player._disconnect_task = None
                 await self.disconnect(guild_id)
 
             player._disconnect_task = asyncio.create_task(disconnect_after_timeout())
 
     def _cancel_disconnect_timer(self, player: GuildPlayer) -> None:
         """Cancel the auto-disconnect timer."""
-        _cancel_task(player._disconnect_task)
+        if player._disconnect_task is not asyncio.current_task():
+            _cancel_task(player._disconnect_task)
         player._disconnect_task = None
 
     def skip(self, guild_id: int) -> bool:
         """Skip the current song. Returns True if something was playing."""
         player = self.get_player(guild_id)
-        if player.voice_client and player.voice_client.is_playing():
+        if player.voice_client and (
+            player.voice_client.is_playing() or player.voice_client.is_paused()
+        ):
             player.voice_client.stop()  # This triggers the after callback
             return True
         return False
@@ -454,6 +561,15 @@ class MusicPlayerManager:
         player.recent_songs.clear()
         player.autoplay_queue.clear()
 
+    def refresh_autoplay(self, guild_id: int) -> bool:
+        """Clear prefetched autoplay songs and fetch new ones if possible."""
+        player = self.get_player(guild_id)
+        player.autoplay_queue.clear()
+        if not player.autoplay_enabled or not player.current_song:
+            return False
+        self._start_prefetch(guild_id, player)
+        return True
+
     def get_queue(self, guild_id: int) -> list[SongInfo]:
         """Get the current queue."""
         player = self.get_player(guild_id)
@@ -470,6 +586,46 @@ class MusicPlayerManager:
             player.queue = deque(queue_list)
             return len(player.queue)
 
+    async def clear_queue(self, guild_id: int) -> int:
+        """Clear queued songs without stopping the current track."""
+        player = self.get_player(guild_id)
+        async with player._lock:
+            count = len(player.queue)
+            songs = list(player.queue)
+            player.queue.clear()
+
+        for song in songs:
+            audio_cache.cancel(song.video_id)
+        return count
+
+    async def remove_from_queue(self, guild_id: int, position: int) -> SongInfo | None:
+        """Remove a queued song by 1-based position."""
+        player = self.get_player(guild_id)
+        async with player._lock:
+            if position < 1 or position > len(player.queue):
+                return None
+            songs = list(player.queue)
+            song = songs.pop(position - 1)
+            player.queue = deque(songs)
+
+        audio_cache.cancel(song.video_id)
+        return song
+
+    async def move_in_queue(
+        self, guild_id: int, from_position: int, to_position: int
+    ) -> tuple[SongInfo, int] | None:
+        """Move a queued song and return it with its final 1-based position."""
+        player = self.get_player(guild_id)
+        async with player._lock:
+            if from_position < 1 or from_position > len(player.queue) or to_position < 1:
+                return None
+            songs = list(player.queue)
+            song = songs.pop(from_position - 1)
+            to_position = min(to_position, len(songs) + 1)
+            songs.insert(to_position - 1, song)
+            player.queue = deque(songs)
+            return song, to_position
+
     def get_autoplay_queue(self, guild_id: int) -> list[SongInfo]:
         """Get the pre-fetched autoplay queue."""
         player = self.get_player(guild_id)
@@ -484,8 +640,11 @@ class MusicPlayerManager:
         """Check if music is currently playing."""
         player = self.get_player(guild_id)
         return bool(
-            player.voice_client
-            and (player.voice_client.is_playing() or player.voice_client.is_paused())
+            player.is_starting
+            or (
+                player.voice_client
+                and (player.voice_client.is_playing() or player.voice_client.is_paused())
+            )
         )
 
     def get_elapsed_seconds(self, guild_id: int) -> int | None:
@@ -508,68 +667,7 @@ class MusicPlayerManager:
         player = self.get_player(guild_id)
         return bool(player.voice_client and player.voice_client.is_paused())
 
-    # ============== Recording Methods ==============
-
-    def is_recording(self, guild_id: int) -> bool:
-        """Check if recording is active for this guild."""
-        player = self.get_player(guild_id)
-        return player.recording_session is not None
-
-    async def start_recording(self, guild_id: int, started_by: int) -> RecordingSession | None:
-        """Start recording voice channel audio. Returns session or None if failed."""
-        player = self.get_player(guild_id)
-
-        if not player.voice_client or not player.voice_client.is_connected():
-            return None
-
-        if player.recording_session:
-            return None  # Already recording
-
-        # Create recording session
-        session_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
-        session = RecordingSession(
-            session_id=session_id,
-            guild_id=guild_id,
-            started_by=started_by,
-        )
-
-        # Create audio sink and start listening
-        sink = WavAudioSink(session)
-        player.voice_client.listen(sink)
-
-        player.recording_session = session
-        player.audio_sink = sink
-
-        return session
-
-    async def stop_recording(self, guild_id: int) -> dict | None:
-        """Stop recording and save files. Returns stats dict or None if not recording."""
-        player = self.get_player(guild_id)
-
-        if not player.recording_session or not player.audio_sink:
-            return None
-
-        # Stop listening
-        if player.voice_client and player.voice_client.is_connected():
-            player.voice_client.stop_listening()
-
-        # Get stats before saving
-        stats = get_recording_stats(player.audio_sink)
-
-        # Save recordings
-        saved_files = save_recordings(player.audio_sink)
-        stats["saved_files"] = {uid: str(path) for uid, path in saved_files.items()}
-        stats["output_dir"] = str(player.recording_session.output_dir)
-        stats["session_id"] = player.recording_session.session_id
-
-        # Cleanup
-        player.audio_sink.cleanup()
-        player.recording_session = None
-        player.audio_sink = None
-
-        return stats
-
-    # ============== Volume and TTS Playback Methods ==============
+    # ============== Volume Methods ==============
 
     def set_volume(self, guild_id: int, volume: float) -> None:
         """
@@ -592,53 +690,6 @@ class MusicPlayerManager:
         """Get current volume for a guild."""
         player = self.get_player(guild_id)
         return player.volume
-
-    async def play_audio_file(self, guild_id: int, file_path: str) -> bool:
-        """
-        Play a local audio file (used for TTS). Waits for playback to complete.
-
-        Args:
-            guild_id: Discord guild ID
-            file_path: Path to audio file (MP3 or WAV)
-
-        Returns:
-            True if playback completed successfully
-        """
-        player = self.get_player(guild_id)
-
-        if not player.voice_client or not player.voice_client.is_connected():
-            return False
-
-        # Wait for current audio to finish if playing (outside lock to avoid blocking)
-        while player.voice_client and player.voice_client.is_playing():
-            await asyncio.sleep(0.1)
-
-        # Create event to signal when playback is done
-        playback_done = asyncio.Event()
-
-        def after_callback(error):
-            if error:
-                print(f"TTS playback error: {error}")
-            # Signal that playback is complete
-            if player.voice_client and player.voice_client.loop:
-                player.voice_client.loop.call_soon_threadsafe(playback_done.set)
-
-        # Use lock briefly only for starting playback to prevent race with play_next
-        async with player._lock:
-            if not player.voice_client or not player.voice_client.is_connected():
-                return False
-
-            # Create audio source from file
-            source = discord.FFmpegPCMAudio(file_path)
-            # Wrap with volume transformer
-            source = discord.PCMVolumeTransformer(source, volume=player.volume)
-
-            # Play the audio
-            player.voice_client.play(source, after=after_callback)
-
-        # Wait for playback to complete (outside lock to allow other operations)
-        await playback_done.wait()
-        return True
 
 
 # Global player manager instance

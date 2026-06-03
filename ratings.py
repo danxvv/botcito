@@ -39,6 +39,7 @@ def get_connection() -> Generator[sqlite3.Connection, None, None]:
     _ensure_data_dir()
     conn = sqlite3.connect(RATINGS_DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
     try:
         yield conn
     finally:
@@ -157,3 +158,19 @@ def get_rating_counts(guild_id: int, video_id: str) -> tuple[int, int]:
             (guild_id, video_id),
         ).fetchone()
         return (row["likes"] or 0, row["dislikes"] or 0)
+
+
+def get_user_favorites(guild_id: int, user_id: int, limit: int = 10) -> list[dict]:
+    """Get a user's liked songs for a guild."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT video_id, title, artist, created_at
+            FROM song_ratings
+            WHERE guild_id = ? AND rated_by = ? AND rating > 0
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (guild_id, user_id, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]

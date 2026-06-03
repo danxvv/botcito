@@ -72,7 +72,7 @@ class ServersScreen(Screen):
         if table.cursor_row is not None and table.row_count > 0:
             row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
             guild_id = int(row_key.value)
-            self.app.push_screen("users", {"guild_id": guild_id})
+            self.app.push_app_screen("users", {"guild_id": guild_id})
 
     def action_refresh(self) -> None:
         """Refresh the data."""

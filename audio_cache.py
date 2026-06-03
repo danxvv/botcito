@@ -10,7 +10,7 @@ import yt_dlp
 
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = Path("data/audio_cache")
+CACHE_DIR = Path(__file__).parent / "data" / "audio_cache"
 COOKIES_FILE = Path(__file__).parent / "cookies.txt"
 MAX_CACHED_FILES = 10
 MAX_CACHE_SIZE_MB = 500
@@ -61,6 +61,10 @@ class AudioCache:
             "no_warnings": False,
             "http_headers": {"User-Agent": user_agent},
             "cachedir": False,
+            "socket_timeout": 15,
+            "retries": 2,
+            "fragment_retries": 2,
+            "extractor_retries": 2,
             "js_runtimes": {"deno": {}, "node": {}, "bun": {}},
             "remote_components": {"ejs:github": {}},
             "extractor_args": {"youtube": {"player_client": ["tv", "web"]}},
@@ -181,6 +185,14 @@ class AudioCache:
                 self._cache_size = max(0, self._cache_size - size)
             except OSError as e:
                 logger.warning("Failed to delete %s: %s", path, e)
+
+    def cancel(self, video_id: str) -> None:
+        """Cancel pending cache work and remove any completed file for one video."""
+        task = self._download_tasks.pop(video_id, None)
+        if task and not task.done():
+            task.cancel()
+        self._ready_events.pop(video_id, None)
+        self.remove(video_id)
 
     def _enforce_limits(self) -> None:
         """Remove oldest files if over count or size limits."""

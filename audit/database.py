@@ -7,6 +7,8 @@ from typing import Generator
 
 from .config import get_audit_db_path
 
+TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
 SCHEMA = """
 -- Command usage logs
 CREATE TABLE IF NOT EXISTS command_logs (
@@ -52,10 +54,16 @@ def get_connection() -> Generator[sqlite3.Connection, None, None]:
     """Get a database connection as a context manager."""
     conn = sqlite3.connect(get_audit_db_path())
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
     try:
         yield conn
     finally:
         conn.close()
+
+
+def _since(hours: int) -> str:
+    """Return a SQLite-compatible timestamp for relative filters."""
+    return (datetime.now() - timedelta(hours=hours)).strftime(TIME_FORMAT)
 
 
 def init_db() -> None:
@@ -70,7 +78,7 @@ def init_db() -> None:
 
 def get_command_stats_by_guild(guild_id: int | None = None, hours: int = 24) -> list[dict]:
     """Get command usage statistics, optionally filtered by guild."""
-    since = datetime.now() - timedelta(hours=hours)
+    since = _since(hours)
 
     with get_connection() as conn:
         if guild_id:
@@ -82,7 +90,7 @@ def get_command_stats_by_guild(guild_id: int | None = None, hours: int = 24) -> 
                 WHERE guild_id = ? AND timestamp > ?
                 GROUP BY command_name
                 ORDER BY count DESC
-            """, (guild_id, since.isoformat())).fetchall()
+            """, (guild_id, since)).fetchall()
         else:
             rows = conn.execute("""
                 SELECT command_name, COUNT(*) as count,
@@ -92,14 +100,14 @@ def get_command_stats_by_guild(guild_id: int | None = None, hours: int = 24) -> 
                 WHERE timestamp > ?
                 GROUP BY command_name
                 ORDER BY count DESC
-            """, (since.isoformat(),)).fetchall()
+            """, (since,)).fetchall()
 
         return [dict(row) for row in rows]
 
 
 def get_command_stats_by_user(guild_id: int | None = None, hours: int = 24) -> list[dict]:
     """Get command usage by user."""
-    since = datetime.now() - timedelta(hours=hours)
+    since = _since(hours)
 
     with get_connection() as conn:
         if guild_id:
@@ -110,7 +118,7 @@ def get_command_stats_by_user(guild_id: int | None = None, hours: int = 24) -> l
                 WHERE guild_id = ? AND timestamp > ?
                 GROUP BY user_id
                 ORDER BY command_count DESC
-            """, (guild_id, since.isoformat())).fetchall()
+            """, (guild_id, since)).fetchall()
         else:
             rows = conn.execute("""
                 SELECT user_id, user_name, COUNT(*) as command_count,
@@ -119,7 +127,7 @@ def get_command_stats_by_user(guild_id: int | None = None, hours: int = 24) -> l
                 WHERE timestamp > ?
                 GROUP BY user_id
                 ORDER BY command_count DESC
-            """, (since.isoformat(),)).fetchall()
+            """, (since,)).fetchall()
 
         return [dict(row) for row in rows]
 
@@ -148,14 +156,14 @@ def get_recent_commands(guild_id: int | None = None, limit: int = 100) -> list[d
 
 def get_guild_command_count(guild_id: int, hours: int = 24) -> int:
     """Get command count for a specific guild in the last N hours."""
-    since = datetime.now() - timedelta(hours=hours)
+    since = _since(hours)
 
     with get_connection() as conn:
         row = conn.execute("""
             SELECT COUNT(*) as count
             FROM command_logs
             WHERE guild_id = ? AND timestamp > ?
-        """, (guild_id, since.isoformat())).fetchone()
+        """, (guild_id, since)).fetchone()
         return row["count"] if row else 0
 
 
@@ -196,20 +204,20 @@ def get_music_history(
 
 def get_guild_song_count(guild_id: int, hours: int = 24) -> int:
     """Get song count for a specific guild in the last N hours."""
-    since = datetime.now() - timedelta(hours=hours)
+    since = _since(hours)
 
     with get_connection() as conn:
         row = conn.execute("""
             SELECT COUNT(*) as count
             FROM music_logs
             WHERE guild_id = ? AND timestamp > ? AND action = 'play'
-        """, (guild_id, since.isoformat())).fetchone()
+        """, (guild_id, since)).fetchone()
         return row["count"] if row else 0
 
 
 def get_user_song_count(user_id: int, guild_id: int | None = None, hours: int = 24) -> int:
     """Get song count for a specific user."""
-    since = datetime.now() - timedelta(hours=hours)
+    since = _since(hours)
 
     with get_connection() as conn:
         if guild_id:
@@ -217,13 +225,13 @@ def get_user_song_count(user_id: int, guild_id: int | None = None, hours: int = 
                 SELECT COUNT(*) as count
                 FROM music_logs
                 WHERE user_id = ? AND guild_id = ? AND timestamp > ? AND action = 'play'
-            """, (user_id, guild_id, since.isoformat())).fetchone()
+            """, (user_id, guild_id, since)).fetchone()
         else:
             row = conn.execute("""
                 SELECT COUNT(*) as count
                 FROM music_logs
                 WHERE user_id = ? AND timestamp > ? AND action = 'play'
-            """, (user_id, since.isoformat())).fetchone()
+            """, (user_id, since)).fetchone()
         return row["count"] if row else 0
 
 
@@ -258,9 +266,9 @@ def get_user_music_stats(user_id: int, guild_id: int | None, hours: int | None) 
         guild_filter = ""
 
         if hours:
-            since = datetime.now() - timedelta(hours=hours)
+            since = _since(hours)
             time_filter = " AND timestamp > ?"
-            params.append(since.isoformat())
+            params.append(since)
 
         if guild_id:
             guild_filter = " AND guild_id = ?"
@@ -277,7 +285,7 @@ def get_user_music_stats(user_id: int, guild_id: int | None, hours: int | None) 
         # Get top songs
         top_params = [user_id]
         if hours:
-            top_params.append(since.isoformat())
+            top_params.append(since)
         if guild_id:
             top_params.append(guild_id)
 
@@ -308,9 +316,9 @@ def get_guild_music_leaderboard(guild_id: int, hours: int | None, limit: int = 1
         time_filter = ""
 
         if hours:
-            since = datetime.now() - timedelta(hours=hours)
+            since = _since(hours)
             time_filter = " AND timestamp > ?"
-            params.append(since.isoformat())
+            params.append(since)
 
         params.append(limit)
 

@@ -4,8 +4,8 @@ Guidance for coding agents working in this `discordbotcito` repository.
 
 ## Project Snapshot
 
-- Discord bot focused on music playback, autoplay recommendations, recording, and AI assistant features.
-- Python 3.10+ codebase with heavy async usage (`discord.py`, `yt-dlp`, SQLite, Agno).
+- Discord bot focused on YouTube music playback, autoplay recommendations, and music listening stats.
+- Python 3.10+ codebase with async Discord voice playback (`discord.py`, `yt-dlp`, SQLite).
 - Package/dependency workflow uses `uv` (prefer `uv` for all Python commands).
 
 ## Build, Run, and Verification Commands
@@ -22,8 +22,8 @@ uv run python main.py
 # Run audit TUI app
 uv run audit
 
-# Quick syntax check (useful before commit)
-uv run python -m compileall .
+# Quick syntax check
+uv run python -m compileall main.py commands audit audio_cache.py autoplay.py music_player.py ratings.py youtube.py
 ```
 
 ## Lint and Format
@@ -44,7 +44,7 @@ uv run pytest tests/
 # Run a single test file
 uv run pytest tests/test_file.py -v
 
-# Run one specific test function (most important)
+# Run one specific test function
 uv run pytest tests/test_file.py::test_function -v
 
 # Optional: run tests matching a keyword
@@ -54,37 +54,34 @@ uv run pytest tests/ -k "keyword" -v
 ## Environment and External Tools
 
 Required runtime dependencies:
+
 - `FFmpeg` for audio playback/transcoding.
-- `Deno` or `Node.js` for yt-dlp JavaScript extraction.
+- `Deno`, `Node.js`, or `Bun` for yt-dlp JavaScript extraction.
 
 Environment variables (`.env`):
 
 ```env
 DISCORD_TOKEN=your_bot_token_here
-
-# Optional /guide feature:
-EXA_API_KEY=your_exa_api_key
-OPENROUTER_API_KEY=your_openrouter_api_key
 ```
 
-## Repository Layout (Key Areas)
+## Repository Layout
 
-- `main.py`: Discord client setup and slash command handlers.
+- `main.py`: Discord client setup and slash command registration.
+- `commands/music.py`: playback, queue, autoplay, and now-playing commands.
+- `commands/stats.py`: music stats, leaderboard, and song rating commands.
 - `music_player.py`: per-guild player state, queue logic, autoplay, voice connection handling.
 - `youtube.py`: async wrappers around blocking `yt-dlp` extraction.
-- `autoplay.py`: YouTube Music recommendation logic.
-- `voice_agent/`: voice conversation orchestration and TTS abstraction.
-- `game_agent/`: AI assistant, session context, MCP connection management.
+- `autoplay.py`: YouTube Music autocomplete and recommendation logic.
+- `ratings.py`: SQLite-backed song rating storage.
 - `audit/`: audit database + textual TUI viewer.
-- `settings.py`: SQLite-backed model/settings storage.
 
 ## Code Style and Conventions
 
 ### Imports
 
 - Keep import groups in this order: standard library, third-party, local modules.
-- Use a blank line between import groups (matches current files).
-- Prefer relative imports inside packages (for example inside `game_agent/`, `audit/`, `voice_agent/`).
+- Use a blank line between import groups.
+- Prefer relative imports inside packages, for example inside `audit/`.
 
 ### Formatting
 
@@ -99,7 +96,6 @@ OPENROUTER_API_KEY=your_openrouter_api_key
 - Prefer Python 3.10+ type syntax:
   - `str | None` over `Optional[str]`
   - `dict[str, Any]` over `Dict[str, Any]`
-- Current code sometimes uses `typing.AsyncGenerator`; this is acceptable in existing files.
 
 ### Naming
 
@@ -110,22 +106,22 @@ OPENROUTER_API_KEY=your_openrouter_api_key
 
 ### Data Modeling
 
-- Prefer `@dataclass` for state/data containers (`SongInfo`, `GuildPlayer`, `ApiKeys`).
+- Prefer `@dataclass` for state/data containers (`SongInfo`, `GuildPlayer`).
 - Use `field(default_factory=...)` for mutable defaults.
 - Use `frozen=True` only when immutable semantics are intended.
 
 ### Async and Concurrency Patterns
 
 - Keep Discord and network/file operations async where possible.
-- Offload blocking work (yt-dlp, heavy CPU) via `run_in_executor`.
+- Offload blocking work such as yt-dlp extraction via `run_in_executor`.
 - Protect shared mutable per-guild state with `asyncio.Lock`.
-- From sync callbacks (e.g., voice `after`), schedule coroutines with `asyncio.run_coroutine_threadsafe`.
+- From sync callbacks such as voice `after`, schedule coroutines with `asyncio.run_coroutine_threadsafe`.
 
 ### Error Handling
 
 - Raise specific exceptions for validation/config failures.
 - Catch specific library exceptions where feasible (`DownloadError`, etc.).
-- Keep user-facing error messages concise and safe (truncate where needed).
+- Keep user-facing error messages concise and safe.
 - Re-raise after logging when caller behavior depends on exception flow.
 
 ### Discord Bot Patterns
@@ -133,25 +129,18 @@ OPENROUTER_API_KEY=your_openrouter_api_key
 - Validate voice prerequisites early in slash commands.
 - Defer interactions when work may take time (`await interaction.response.defer()`).
 - Keep responses user-friendly; prefer ephemeral responses for user-specific failures.
-- Respect guild-scoped state boundaries (`guild_id` keyed player/session state).
+- Respect guild-scoped state boundaries (`guild_id` keyed player state).
 
 ## Data and Persistence Notes
 
 - SQLite files are created under `data/` at runtime.
 - Important DB files:
-  - `data/settings.db`
   - `data/audit.db`
-  - `data/agent_memory.db`
+  - `data/ratings.db`
 
 ## Agent Workflow Recommendations
 
 - Make focused, minimal edits and preserve existing behavior unless task requires changes.
-- Run targeted validation for touched areas (at least `compileall`; tests if present/added).
+- Run targeted validation for touched areas, at least `compileall`; tests if present/added.
 - Do not commit generated artifacts, secrets, or local runtime data.
 - Prefer documenting new operational commands in `README.md` and this file.
-
-## Cursor/Copilot Rules
-
-- No Cursor rules were found (`.cursor/rules/` or `.cursorrules` absent).
-- No Copilot instructions were found (`.github/copilot-instructions.md` absent).
-- If these files are later added, treat them as higher-priority supplemental instructions and mirror key constraints in this document.

@@ -1,5 +1,6 @@
 """Audit logging for Discord bot commands."""
 
+import asyncio
 import functools
 import json
 import threading
@@ -121,26 +122,28 @@ def log_command(func: Callable) -> Callable:
 
         try:
             result = await func(interaction, *args, **kwargs)
-            AuditLogger.log_command(
+            await asyncio.to_thread(
+                AuditLogger.log_command,
                 guild_id,
                 guild_name,
                 user_id,
                 user_name,
                 command_name,
                 loggable_kwargs,
-                success=True,
+                True,
             )
             return result
         except Exception as e:
-            AuditLogger.log_command(
+            await asyncio.to_thread(
+                AuditLogger.log_command,
                 guild_id,
                 guild_name,
                 user_id,
                 user_name,
                 command_name,
                 loggable_kwargs,
-                success=False,
-                error_message=str(e)[:500],
+                False,
+                str(e)[:500],
             )
             raise
 

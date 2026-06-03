@@ -1,12 +1,20 @@
 """Stats and rating commands: stats, leaderboard, like, dislike."""
 
+import asyncio
+
 import discord
 from discord import app_commands
 
 from audit.database import get_user_music_stats, get_guild_music_leaderboard
 from audit.logger import log_command
 from music_player import player_manager
-from ratings import rate_song, get_user_rating, get_rating_counts
+from ratings import (
+    get_rating_counts,
+    get_user_favorites,
+    get_user_rating,
+    rate_song,
+    remove_rating,
+)
 
 from commands.helpers import format_duration, period_to_hours
 
@@ -27,7 +35,7 @@ def setup(client):
         user_id = interaction.user.id
         hours = period_to_hours(period)
 
-        user_stats = get_user_music_stats(user_id, guild_id, hours)
+        user_stats = await asyncio.to_thread(get_user_music_stats, user_id, guild_id, hours)
 
         period_name = period.name if period else "All time"
         embed = discord.Embed(
@@ -69,7 +77,9 @@ def setup(client):
         guild_id = interaction.guild_id
         hours = period_to_hours(period)
 
-        leaderboard_data = get_guild_music_leaderboard(guild_id, hours, limit=10)
+        leaderboard_data = await asyncio.to_thread(
+            get_guild_music_leaderboard, guild_id, hours, 10
+        )
 
         period_name = period.name if period else "All time"
         embed = discord.Embed(
@@ -105,15 +115,15 @@ def setup(client):
             await interaction.response.send_message("Nothing is playing.", ephemeral=True)
             return
 
-        current_rating = get_user_rating(guild_id, song.video_id, user_id)
+        current_rating = await asyncio.to_thread(get_user_rating, guild_id, song.video_id, user_id)
         if current_rating == rating:
             await interaction.response.send_message(
                 f"You already {action} **{song.title}**!", ephemeral=True
             )
             return
 
-        rate_song(guild_id, song.video_id, user_id, rating, title=song.title)
-        likes, dislikes = get_rating_counts(guild_id, song.video_id)
+        await asyncio.to_thread(rate_song, guild_id, song.video_id, user_id, rating, song.title)
+        likes, dislikes = await asyncio.to_thread(get_rating_counts, guild_id, song.video_id)
 
         await interaction.response.send_message(
             f"{emoji} {action.capitalize()} **{song.title}**!\n"
@@ -131,3 +141,50 @@ def setup(client):
     async def dislike(interaction: discord.Interaction):
         """Dislike the currently playing song."""
         await _handle_song_rating(interaction, rating=-1, emoji="\U0001f44e", action="disliked")
+
+    @client.tree.command(name="unrate", description="Remove your rating for the current song")
+    @log_command
+    async def unrate(interaction: discord.Interaction):
+        """Remove the user's rating for the current song."""
+        guild_id = interaction.guild_id
+        user_id = interaction.user.id
+        song = player_manager.get_current_song(guild_id)
+
+        if not song:
+            await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+            return
+
+        removed = await asyncio.to_thread(remove_rating, guild_id, song.video_id, user_id)
+        if not removed:
+            await interaction.response.send_message("You have not rated this song.", ephemeral=True)
+            return
+
+        likes, dislikes = await asyncio.to_thread(get_rating_counts, guild_id, song.video_id)
+        await interaction.response.send_message(
+            f"Removed your rating for **{song.title}**.\n"
+            f"Rating: {likes} \U0001f44d / {dislikes} \U0001f44e"
+        )
+
+    @client.tree.command(name="favorites", description="Show your liked songs")
+    @log_command
+    async def favorites(interaction: discord.Interaction):
+        """Show the user's recently liked songs."""
+        favorites_data = await asyncio.to_thread(
+            get_user_favorites, interaction.guild_id, interaction.user.id, 10
+        )
+
+        if not favorites_data:
+            await interaction.response.send_message("No liked songs yet.", ephemeral=True)
+            return
+
+        lines = []
+        for i, song in enumerate(favorites_data, 1):
+            title = song["title"] or song["video_id"]
+            lines.append(f"{i}. [{title}](https://www.youtube.com/watch?v={song['video_id']})")
+
+        embed = discord.Embed(
+            title=f"Favorites for {interaction.user.display_name}",
+            description="\n".join(lines),
+            color=discord.Color.green(),
+        )
+        await interaction.response.send_message(embed=embed)

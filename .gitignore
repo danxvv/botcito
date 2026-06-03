@@ -11,12 +11,10 @@ wheels/
 
 # Environment variables
 .env
+cookies.txt
 
 # Database files
 data/
-
-# IDE and tools
-.claude/
 
 # Windows artifacts
 nul

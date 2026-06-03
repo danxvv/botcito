@@ -132,7 +132,7 @@ class AuditApp(App):
         if hasattr(self.screen, "action_refresh"):
             self.screen.action_refresh()
 
-    def push_screen(self, screen_name: str, params: dict | None = None) -> None:
+    def push_app_screen(self, screen_name: str, params: dict | None = None) -> None:
         """Push a screen with optional parameters."""
         if params and screen_name == "users":
             # Create a new instance with the guild_id
