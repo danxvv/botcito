@@ -21,6 +21,10 @@ class SongInfo:
     video_id: str
     webpage_url: str
     local_path: str | None = None  # Path to cached audio file
+    requested_by_id: int = 0
+    requested_by_name: str = "Autoplay"
+    guild_name: str = "Unknown"
+    source_type: str = "search"
 
 
 # yt-dlp options for playlist extraction (flat mode)
@@ -31,6 +35,10 @@ _YDL_OPTIONS_PLAYLIST = {
     "no_warnings": False,
     "extract_flat": "in_playlist",
     "ignoreerrors": True,
+    "socket_timeout": 15,
+    "retries": 2,
+    "fragment_retries": 2,
+    "extractor_retries": 2,
     # Enable multiple JS runtimes as fallback
     "js_runtimes": {"deno": {}, "node": {}, "bun": {}},
     # Enable remote EJS challenge solver scripts
@@ -59,6 +67,10 @@ _YDL_OPTIONS_SINGLE = {
     "no_warnings": False,
     # Add http headers to help with 403 issues
     "http_headers": {"User-Agent": _USER_AGENT},
+    "socket_timeout": 15,
+    "retries": 2,
+    "fragment_retries": 2,
+    "extractor_retries": 2,
     # Enable multiple JS runtimes as fallback
     "js_runtimes": {"deno": {}, "node": {}, "bun": {}},
     # Enable remote EJS challenge solver scripts
@@ -74,6 +86,8 @@ _YDL_OPTIONS_SINGLE = {
 
 # Thread pool for running blocking yt-dlp operations
 _executor = ThreadPoolExecutor(max_workers=3)
+_extract_semaphore = asyncio.Semaphore(3)
+EXTRACT_TIMEOUT = 45
 atexit.register(_executor.shutdown, wait=False)
 
 
@@ -98,8 +112,42 @@ def _extract_info(url: str, *, playlist: bool = False) -> dict | None:
                 print("Error: yt-dlp requires Deno/Node.js for YouTube.")
                 print("Install Deno: https://deno.land")
             return None
-        except ExtractorError:
+        except (ExtractorError, OSError):
             return None
+
+
+async def _run_extract(query: str, *, playlist: bool = False) -> dict | None:
+    """Run yt-dlp in the bounded extraction pool."""
+    loop = asyncio.get_running_loop()
+    async with _extract_semaphore:
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(_executor, lambda: _extract_info(query, playlist=playlist)),
+                timeout=EXTRACT_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            print(f"[ERROR] yt-dlp extraction timed out for: {query}")
+            return None
+
+
+async def _unwrap_search_result(info: dict) -> dict | None:
+    """Return the first playable entry from a yt-dlp search/playlist result."""
+    entries = info.get("entries")
+    if not entries:
+        return info
+
+    for entry in entries:
+        if not entry:
+            continue
+        if entry.get("url") and (entry.get("formats") or entry.get("acodec")):
+            return entry
+        video_id = entry.get("id")
+        if video_id:
+            return await _run_extract(f"https://www.youtube.com/watch?v={video_id}")
+        entry_url = entry.get("webpage_url") or entry.get("url")
+        if entry_url:
+            return await _run_extract(entry_url)
+    return None
 
 
 async def extract_song_info(query: str) -> SongInfo | None:
@@ -116,9 +164,12 @@ async def extract_song_info(query: str) -> SongInfo | None:
     if len(query) == 11 and not query.startswith("http"):
         query = f"https://www.youtube.com/watch?v={query}"
 
-    loop = asyncio.get_running_loop()
-    info = await loop.run_in_executor(_executor, _extract_info, query)
+    info = await _run_extract(query)
 
+    if not info:
+        return None
+
+    info = await _unwrap_search_result(info)
     if not info:
         return None
 
@@ -154,8 +205,7 @@ async def extract_playlist(url: str) -> list[dict]:
     Returns:
         List of video entries with basic info (id, title)
     """
-    loop = asyncio.get_running_loop()
-    info = await loop.run_in_executor(_executor, lambda: _extract_info(url, playlist=True))
+    info = await _run_extract(url, playlist=True)
 
     if not info:
         return []

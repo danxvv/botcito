@@ -1,7 +1,11 @@
 """YouTube Music handler for search autocomplete and autoplay recommendations."""
 
+import asyncio
+import atexit
 import logging
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from time import monotonic
 
 from ytmusicapi import YTMusic
 
@@ -10,6 +14,10 @@ logger = logging.getLogger(__name__)
 # Cache and history limits
 MAX_RECOMMENDATION_CACHE_SIZE = 50
 MAX_PLAYED_VIDEOS_SIZE = 200
+SEARCH_CACHE_TTL = 30
+
+_executor = ThreadPoolExecutor(max_workers=3)
+atexit.register(_executor.shutdown, wait=False)
 
 
 class YouTubeMusicHandler:
@@ -20,6 +28,7 @@ class YouTubeMusicHandler:
         self._played_videos_list: list[str] = []  # Ordered list for LRU-style eviction
         self._played_videos_set: set[str] = set()  # Set for O(1) lookups
         self._recommendation_cache: OrderedDict[str, list[dict]] = OrderedDict()  # LRU cache
+        self._search_cache: OrderedDict[tuple[str, int], tuple[float, list[dict]]] = OrderedDict()
 
     def search_songs(self, query: str, limit: int = 10) -> list[dict]:
         """
@@ -50,6 +59,21 @@ class YouTubeMusicHandler:
         except Exception as e:
             logger.exception("Failed to search songs for query '%s': %s", query, e)
             return []
+
+    async def search_songs_async(self, query: str, limit: int = 10) -> list[dict]:
+        """Search songs without blocking the event loop."""
+        key = (query.strip().lower(), limit)
+        cached = self._search_cache.get(key)
+        if cached and monotonic() - cached[0] < SEARCH_CACHE_TTL:
+            self._search_cache.move_to_end(key)
+            return cached[1]
+
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(_executor, self.search_songs, query, limit)
+        self._search_cache[key] = (monotonic(), results)
+        while len(self._search_cache) > 50:
+            self._search_cache.popitem(last=False)
+        return results
 
     def get_recommendations(self, video_id: str, limit: int = 10) -> list[dict]:
         """
@@ -109,6 +133,11 @@ class YouTubeMusicHandler:
         except Exception as e:
             logger.exception("Failed to get recommendations for video '%s': %s", video_id, e)
             return []
+
+    async def get_recommendations_async(self, video_id: str, limit: int = 10) -> list[dict]:
+        """Get recommendations without blocking the event loop."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_executor, self.get_recommendations, video_id, limit)
 
     def mark_played(self, video_id: str) -> None:
         """Mark a video as played to avoid repeating in autoplay."""
