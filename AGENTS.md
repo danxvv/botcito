@@ -13,6 +13,13 @@ Guidance for coding agents working in this `discordbotcito` repository.
 Use these commands from repo root.
 
 ```bash
+# Build and start the containerized bot (.env must contain DISCORD_TOKEN)
+docker compose up -d --build
+
+# Follow container logs / open its audit TUI
+docker compose logs -f bot
+docker compose exec bot audit
+
 # Install/update dependencies
 uv sync
 
@@ -34,8 +41,8 @@ uv run python -m compileall main.py commands audit audio_cache.py autoplay.py mu
 
 ## Testing
 
-- There is currently no `tests/` directory in the repository.
-- When creating tests, use `pytest` under `tests/`.
+- Use `pytest` under `tests/` (installed by `uv sync` as a development dependency).
+- The regression suite runs offline with fake voice clients and mocked extraction; do not require tokens or external music downloads.
 
 ```bash
 # Run full test suite
@@ -68,6 +75,9 @@ DISCORD_TOKEN=your_bot_token_here
 
 - `main.py`: Discord client setup and slash command registration.
 - `commands/music.py`: playback, queue, autoplay, and now-playing commands.
+- `commands/music_requests.py`: cancellable search and incremental playlist requests.
+- `commands/player_view.py`: shared player card, refreshed during the session.
+- `commands/queue_view.py`: paginated queue editing by stable song entry ID.
 - `commands/stats.py`: music stats, leaderboard, and song rating commands.
 - `music_player.py`: per-guild player state, queue logic, autoplay, voice connection handling.
 - `youtube.py`: async wrappers around blocking `yt-dlp` extraction.
@@ -134,6 +144,8 @@ DISCORD_TOKEN=your_bot_token_here
 ## Data and Persistence Notes
 
 - SQLite files are created under `data/` at runtime.
+- Docker Compose persists `/app/data` in the `bot-data` named volume, separate from local `data/`. `docker compose down` preserves it; `docker compose down -v` removes it.
+- The image runs as `botcito` (UID/GID 10001), includes FFmpeg and Node.js, and installs production dependencies from `uv.lock`. Keep application modules included in `.dockerignore` when adding source files.
 - Important DB files:
   - `data/audit.db`
   - `data/ratings.db`

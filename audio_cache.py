@@ -1,222 +1,201 @@
-"""Pre-download audio cache to eliminate mid-song network stuttering."""
+"""Bounded audio downloads shared safely between listening sessions."""
 
 import asyncio
 import atexit
 import logging
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import Event
 
 import yt_dlp
+from yt_dlp.utils import DownloadError
+
+from youtube import SongInfo, _get_options
 
 logger = logging.getLogger(__name__)
-
 CACHE_DIR = Path(__file__).parent / "data" / "audio_cache"
-COOKIES_FILE = Path(__file__).parent / "cookies.txt"
 MAX_CACHED_FILES = 10
 MAX_CACHE_SIZE_MB = 500
 DOWNLOAD_TIMEOUT = 60
-
+STARTUP_WAIT = 3.0
 _download_executor = ThreadPoolExecutor(max_workers=2)
 atexit.register(_download_executor.shutdown, wait=False)
 
 
 class AudioCache:
-    """Manages pre-downloading and caching audio files for smooth playback."""
+    """Download ahead, sharing files without cancelling another server's music."""
 
-    def __init__(self, cache_dir: Path = CACHE_DIR):
+    def __init__(self, cache_dir: Path = CACHE_DIR) -> None:
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._files: dict[str, Path] = {}
-        self._cache_size: int = 0  # Track total size in memory
-        self._ready_events: dict[str, asyncio.Event] = {}
         self._download_tasks: dict[str, asyncio.Task] = {}
-        self._lock = asyncio.Lock()
-        self._clean_stale_files()
+        self._cancellations: dict[str, Event] = {}
+        self._users: dict[str, set[str]] = {}
+        self._playing: dict[str, str] = {}
 
-    def _clean_stale_files(self) -> None:
-        """Remove leftover files from previous runs."""
-        for f in self.cache_dir.iterdir():
-            if f.is_file():
-                try:
-                    f.unlink()
-                except OSError:
-                    pass
-
-    def _download_sync(self, video_id: str, webpage_url: str) -> Path | None:
-        """Download audio file via yt-dlp (blocking, runs in executor)."""
-        # Clean any pre-existing files for this video_id before downloading
-        for f in self.cache_dir.glob(f"{video_id}.*"):
+    def clear_stale_files(self) -> None:
+        """Clean the previous process's temporary audio once, at bot startup."""
+        for path in self.cache_dir.iterdir():
             try:
-                f.unlink()
+                if path.is_file():
+                    path.unlink(missing_ok=True)
+                elif path.name.startswith("download-") and path.is_dir():
+                    shutil.rmtree(path)
             except OSError:
-                pass
+                logger.warning("Could not remove stale audio cache file %s", path)
 
-        output_template = str(self.cache_dir / video_id)
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        ydl_opts = {
-            "format": "251/250/249/140/139/bestaudio/best",
-            "outtmpl": output_template,
-            "noplaylist": True,
-            "quiet": False,
-            "no_warnings": False,
-            "http_headers": {"User-Agent": user_agent},
-            "cachedir": False,
-            "socket_timeout": 15,
-            "retries": 2,
-            "fragment_retries": 2,
-            "extractor_retries": 2,
-            "js_runtimes": {"deno": {}, "node": {}, "bun": {}},
-            "remote_components": {"ejs:github": {}},
-            "extractor_args": {"youtube": {"player_client": ["tv", "web"]}},
-        }
-        if COOKIES_FILE.exists():
-            ydl_opts["cookiefile"] = str(COOKIES_FILE)
-            print(f"[DEBUG] Cache using cookies from: {COOKIES_FILE}")
-        else:
-            print(f"[DEBUG] No cookies file at: {COOKIES_FILE}")
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([webpage_url])
-            # yt-dlp appends the extension; find the actual file
-            for f in self.cache_dir.glob(f"{video_id}.*"):
-                return f
-            output_path = Path(output_template)
-            if output_path.exists():
-                return output_path
+    def retain(self, song: SongInfo) -> None:
+        self._users.setdefault(song.video_id, set()).add(song.entry_id)
+
+    def protect(self, song: SongInfo) -> None:
+        self.retain(song)
+        self._playing[song.entry_id] = song.video_id
+
+    def release(self, song: SongInfo) -> None:
+        self._playing.pop(song.entry_id, None)
+        users = self._users.get(song.video_id, set())
+        users.discard(song.entry_id)
+        if not users:
+            self._users.pop(song.video_id, None)
+            self.cancel(song.video_id)
+        self._enforce_limits()
+
+    def _download_sync(self, song: SongInfo, cancelled: Event) -> Path | None:
+        def check_cancelled(progress: dict) -> None:
+            if cancelled.is_set():
+                raise DownloadError("Download cancelled")
+
+        if cancelled.is_set():
             return None
-        except Exception as e:
-            logger.error("Download failed for %s: %s", video_id, e)
-            return None
-
-    async def ensure_downloaded(self, song) -> bool:
-        """Ensure a song is downloaded. Waits if already in progress."""
-        async with self._lock:
-            if song.video_id in self._files:
-                path = self._files[song.video_id]
-                if path.exists():
-                    song.local_path = str(path)
-                    return True
-                else:
-                    del self._files[song.video_id]
-
-            event = self._ready_events.get(song.video_id)
-
-        if event:
-            try:
-                await asyncio.wait_for(event.wait(), timeout=DOWNLOAD_TIMEOUT)
-            except asyncio.TimeoutError:
-                return False
-            async with self._lock:
-                if song.video_id in self._files:
-                    song.local_path = str(self._files[song.video_id])
-                    return True
-            return False
-
-        return await self._start_download(song)
-
-    async def _start_download(self, song) -> bool:
-        """Start a download and wait for completion."""
-        event = asyncio.Event()
-        async with self._lock:
-            # Double-check another task didn't start while we waited for lock
-            if song.video_id in self._ready_events:
-                existing_event = self._ready_events[song.video_id]
-            else:
-                existing_event = None
-                self._ready_events[song.video_id] = event
-
-        # If another download is in progress, wait for it outside the lock
-        if existing_event:
-            try:
-                await asyncio.wait_for(existing_event.wait(), timeout=DOWNLOAD_TIMEOUT)
-            except asyncio.TimeoutError:
-                return False
-            async with self._lock:
-                if song.video_id in self._files:
-                    song.local_path = str(self._files[song.video_id])
-                    return True
-            return False
-
-        loop = asyncio.get_running_loop()
-        try:
-            path = await asyncio.wait_for(
-                loop.run_in_executor(
-                    _download_executor,
-                    self._download_sync,
-                    song.video_id,
-                    song.webpage_url,
-                ),
-                timeout=DOWNLOAD_TIMEOUT,
+        with TemporaryDirectory(prefix="download-", dir=self.cache_dir) as directory:
+            options = _get_options()
+            options.update(
+                {
+                    "outtmpl": str(Path(directory) / "audio.%(ext)s"),
+                    "cachedir": False,
+                    "progress_hooks": [check_cancelled],
+                    "quiet": True,
+                }
             )
-            if path and path.exists():
-                file_size = path.stat().st_size
-                async with self._lock:
-                    self._files[song.video_id] = path
-                    self._cache_size += file_size
-                    self._enforce_limits()
-                song.local_path = str(path)
-                return True
-            return False
-        except (asyncio.TimeoutError, Exception) as e:
-            logger.error("Download failed for %s: %s", song.video_id, e)
-            return False
-        finally:
-            event.set()
-            async with self._lock:
-                self._ready_events.pop(song.video_id, None)
+            try:
+                with yt_dlp.YoutubeDL(options) as ydl:
+                    info = ydl.extract_info(song.webpage_url, download=True)
+                    if not info or cancelled.is_set():
+                        return None
+                    path = Path(info.get("filepath") or ydl.prepare_filename(info))
+                if not path.is_file() or path.suffix in {".part", ".ytdl"}:
+                    return None
+                destination = self.cache_dir / f"{Path(directory).name}{path.suffix}"
+                path.replace(destination)
+                return destination
+            except (DownloadError, OSError):
+                if not cancelled.is_set():
+                    logger.exception("Audio download failed for %s", song.video_id)
+                return None
 
-    def start_background_download(self, song) -> None:
-        """Fire-and-forget download. Does not block."""
-        vid = song.video_id
-        if vid in self._files or vid in self._ready_events:
+    async def _download(self, song: SongInfo, cancelled: Event) -> None:
+        future = asyncio.get_running_loop().run_in_executor(
+            _download_executor, self._download_sync, song, cancelled
+        )
+        try:
+            path = await asyncio.wait_for(asyncio.shield(future), DOWNLOAD_TIMEOUT)
+            if path:
+                self._files[song.video_id] = path
+                self._enforce_limits()
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            cancelled.set()
+
+            # Cancelling an executor future does not stop its thread. Reap a late file.
+            def discard_result(result: asyncio.Future) -> None:
+                try:
+                    path = result.result()
+                    if path:
+                        path.unlink(missing_ok=True)
+                except (Exception, asyncio.CancelledError):
+                    logger.debug("Cancelled download cleanup failed", exc_info=True)
+
+            future.add_done_callback(discard_result)
+        except Exception:
+            logger.exception("Audio cache failed for %s", song.video_id)
+
+    def start_background_download(self, song: SongInfo) -> None:
+        if (
+            song.is_live
+            or self.is_ready(song.video_id)
+            or song.video_id in self._download_tasks
+        ):
             return
+        cancelled = Event()
+        self._cancellations[song.video_id] = cancelled
+        task = asyncio.create_task(self._download(song, cancelled))
+        self._download_tasks[song.video_id] = task
 
-        task = asyncio.create_task(self._start_download(song))
-        self._download_tasks[vid] = task
-        task.add_done_callback(lambda _: self._download_tasks.pop(vid, None))
+        def finished(completed: asyncio.Task) -> None:
+            if self._download_tasks.get(song.video_id) is completed:
+                self._download_tasks.pop(song.video_id, None)
+                self._cancellations.pop(song.video_id, None)
+
+        task.add_done_callback(finished)
+
+    async def ensure_downloaded(
+        self, song: SongInfo, timeout: float = STARTUP_WAIT
+    ) -> bool:
+        """Wait briefly for a file, leaving slow downloads running in the background."""
+        self.start_background_download(song)
+        task = self._download_tasks.get(song.video_id)
+        if task:
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout)
+            except asyncio.TimeoutError:
+                pass
+        path = self._files.get(song.video_id)
+        song.local_path = str(path) if path and path.is_file() else None
+        return song.local_path is not None
 
     def remove(self, video_id: str) -> None:
-        """Delete cached file for a song."""
         path = self._files.pop(video_id, None)
-        if path and path.exists():
+        if path:
             try:
-                size = path.stat().st_size
-                path.unlink()
-                self._cache_size = max(0, self._cache_size - size)
-            except OSError as e:
-                logger.warning("Failed to delete %s: %s", path, e)
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove cached audio", exc_info=True)
 
     def cancel(self, video_id: str) -> None:
-        """Cancel pending cache work and remove any completed file for one video."""
+        cancelled = self._cancellations.pop(video_id, None)
+        if cancelled:
+            cancelled.set()
         task = self._download_tasks.pop(video_id, None)
-        if task and not task.done():
+        if task:
             task.cancel()
-        self._ready_events.pop(video_id, None)
         self.remove(video_id)
 
     def _enforce_limits(self) -> None:
-        """Remove oldest files if over count or size limits."""
-        while len(self._files) > MAX_CACHED_FILES:
-            oldest_id = next(iter(self._files))
-            self.remove(oldest_id)
-
-        max_bytes = MAX_CACHE_SIZE_MB * 1024 * 1024
-        while self._cache_size > max_bytes and self._files:
-            oldest_id = next(iter(self._files))
-            self.remove(oldest_id)
+        total = sum(
+            path.stat().st_size for path in self._files.values() if path.exists()
+        )
+        for video_id, path in list(self._files.items()):
+            if (
+                len(self._files) <= MAX_CACHED_FILES
+                and total <= MAX_CACHE_SIZE_MB * 1024 * 1024
+            ):
+                break
+            if video_id in self._playing.values():
+                continue
+            total -= path.stat().st_size if path.exists() else 0
+            self.remove(video_id)
 
     def is_ready(self, video_id: str) -> bool:
-        """Check if a song is already downloaded."""
-        return video_id in self._files
+        path = self._files.get(video_id)
+        return bool(path and path.is_file())
 
     def cleanup_all(self) -> None:
-        """Remove all cached files and cancel in-flight downloads."""
-        for task in self._download_tasks.values():
-            task.cancel()
-        self._download_tasks.clear()
-        self._ready_events.clear()
-        for vid in list(self._files):
-            self.remove(vid)
+        for video_id in set(self._download_tasks) | set(self._files):
+            self.cancel(video_id)
+        self._users.clear()
+        self._playing.clear()
 
 
 audio_cache = AudioCache()

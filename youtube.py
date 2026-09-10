@@ -3,8 +3,11 @@
 import atexit
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from time import monotonic
+from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 import yt_dlp
 from yt_dlp.utils import DownloadError, ExtractorError
@@ -25,6 +28,9 @@ class SongInfo:
     requested_by_name: str = "Autoplay"
     guild_name: str = "Unknown"
     source_type: str = "search"
+    entry_id: str = field(default_factory=lambda: uuid4().hex)
+    extracted_at: float = field(default_factory=monotonic)
+    is_live: bool = False
 
 
 # yt-dlp options for playlist extraction (flat mode)
@@ -192,6 +198,7 @@ async def extract_song_info(query: str) -> SongInfo | None:
         thumbnail=info.get("thumbnail", ""),
         video_id=info.get("id", ""),
         webpage_url=info.get("webpage_url", query),
+        is_live=bool(info.get("is_live")),
     )
 
 
@@ -235,7 +242,24 @@ async def extract_playlist(url: str) -> list[dict]:
 
 def is_playlist_url(url: str) -> bool:
     """Check if the URL is a playlist."""
-    return "list=" in url or "/playlist" in url
+    parsed = urlparse(url)
+    return parsed.hostname in {"youtube.com", "www.youtube.com", "music.youtube.com", "m.youtube.com", "youtu.be"} and (
+        bool(parse_qs(parsed.query).get("list")) or parsed.path == "/playlist"
+    )
+
+
+def single_video_url(url: str) -> str | None:
+    """Return the individual video in a YouTube URL, without its playlist."""
+    parsed = urlparse(url)
+    if parsed.hostname == "youtu.be":
+        video_id = parsed.path.strip("/").split("/")[0]
+    elif parsed.hostname in {"youtube.com", "www.youtube.com", "music.youtube.com", "m.youtube.com"}:
+        video_id = parse_qs(parsed.query).get("v", [""])[0]
+        if parsed.path.startswith(("/shorts/", "/live/")):
+            video_id = parsed.path.split("/")[2]
+    else:
+        return None
+    return f"https://www.youtube.com/watch?v={video_id}" if video_id else None
 
 
 async def search_youtube(query: str) -> SongInfo | None:

@@ -1,0 +1,20 @@
+# Only application source and dependency metadata belong in the image.
+# This excludes .env, cookies.txt, data/, .venv/, tests, and Git history.
+**
+!pyproject.toml
+!uv.lock
+!.python-version
+!README.md
+!main.py
+!audio_cache.py
+!autoplay.py
+!music_player.py
+!ratings.py
+!youtube.py
+!commands/
+!commands/*.py
+!audit/
+!audit/*.py
+!audit/styles.tcss
+!audit/screens/
+!audit/screens/*.py
