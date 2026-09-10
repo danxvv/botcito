@@ -1,0 +1,14 @@
+services:
+  bot:
+    build: .
+    init: true
+    restart: unless-stopped
+    environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN:?Set DISCORD_TOKEN in .env before starting the bot}
+      SYNC_COMMANDS: ${SYNC_COMMANDS:-1}
+    volumes:
+      - bot-data:/app/data
+    stop_grace_period: 30s
+
+volumes:
+  bot-data:

@@ -1,6 +1,7 @@
 """Shared helper functions used across command modules."""
 
 import asyncio
+import logging
 
 import discord
 from discord import app_commands
@@ -40,10 +41,11 @@ def render_progress_bar(elapsed: int, total: int, width: int = 20) -> str:
 
 async def ensure_voice(interaction: discord.Interaction) -> bool:
     """Ensure user is in a voice channel and bot can connect."""
-    if not interaction.user.voice:
-        await interaction.response.send_message(
-            "You need to be in a voice channel!", ephemeral=True
-        )
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await respond(interaction, "Use music commands in a server's voice channel.")
+        return False
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await respond(interaction, "Join a voice channel, then use /play to choose a song.")
         return False
     return True
 
@@ -56,11 +58,36 @@ async def ensure_same_voice(
         return False
 
     if voice_client and voice_client.channel.id != interaction.user.voice.channel.id:
-        await interaction.response.send_message(
-            "Join my voice channel first.", ephemeral=True
-        )
+        await respond(interaction, f"Music is in <#{voice_client.channel.id}>. Join that channel first.")
         return False
     return True
+
+
+async def respond(interaction: discord.Interaction, message: str) -> None:
+    """Send a private response before or after an interaction was acknowledged."""
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+    else:
+        await interaction.response.send_message(message, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+class MusicView(discord.ui.View):
+    """Make failed controls and expired temporary menus understandable."""
+
+    def __init__(self, *, timeout: float | None = 180) -> None:
+        super().__init__(timeout=timeout)
+        self.message: discord.Message | None = None
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None:
+        logging.getLogger(__name__).error("Music control failed", exc_info=error)
+        await respond(interaction, "That control could not complete. Try again, or use /nowplaying to open the player.")
+
+    async def on_timeout(self) -> None:
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except discord.HTTPException:
+                pass
 
 
 def _log_music_event(interaction: discord.Interaction, song, source_type: str, action: str):
