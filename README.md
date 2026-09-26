@@ -1,157 +1,221 @@
-# Discord Music Bot
+# botcito
 
-A Discord bot focused on YouTube music playback, queue controls, autoplay recommendations, and music listening stats.
+**Music for your Discord server, one `/play` away.**
 
-## Features
+botcito is a Discord music bot you host yourself. Play songs and playlists from YouTube, build a queue with friends, and let autoplay keep the music going. Shared player controls, song ratings, and listening stats live right in Discord.
 
-- **YouTube playback** - Play songs from URLs, playlists, or search queries, with cancellable preparation and quick streaming fallback.
-- **Smart autocomplete** - Song suggestions from YouTube Music while typing `/play`.
-- **Autoplay** - Recommendations based on recently played songs.
-- **Shared player** - One card follows each listening session with playback controls, volume, autoplay, ratings, and updated progress.
-- **Queue controls** - Browse every queued song, see who requested it and its estimated waiting time, and select songs to move or remove.
-- **Music stats and ratings** - Track listening history and like/dislike songs for autoplay ranking.
-- **Auto-disconnect** - Leaves voice after 5 minutes of inactivity.
+[Get started](#get-started) · [Listen together](#listen-together) · [Commands](#commands) · [Troubleshooting](#troubleshooting) · [Contributing](#contributing)
 
-## Run with Docker Compose
+## What you can do
 
-Install Docker with the Compose plugin, then create your local configuration:
+- **Find a song quickly.** Search by name, choose a YouTube Music autocomplete suggestion, or paste a YouTube link.
+- **Bring a whole playlist.** Start listening while the remaining tracks load, with progress updates and a cancel button.
+- **Share the controls.** Pause, skip, change volume, rate songs, and toggle autoplay from a player card that updates during the session.
+- **Make the queue your own.** Browse songs and requesters, move a track up next, remove entries, or shuffle the queue.
+- **Discover more music.** Autoplay recommends songs using recent plays and likes/dislikes.
+- **See your listening history.** Replay recent tracks, find your liked songs, and check personal stats or the server leaderboard.
+
+## Get started
+
+You'll need a Discord server where you can add bots and a computer or server that stays on while botcito runs. Docker Compose includes Python, FFmpeg, Node.js, and the Python dependencies for you. Prefer running directly on your machine? Follow [Run locally](#run-locally) after creating your Discord bot.
+
+### 1. Create your Discord bot
+
+1. Create an application in the [Discord Developer Portal](https://discord.com/developers/applications).
+2. Open **Bot**, generate a token, and save it for the next step.
+3. Under **Installation**, enable **Guild Install** and select **Discord Provided Link**.
+4. In **Default Install Settings → Guild Install**, select the `bot` and `applications.commands` scopes.
+5. Add these permissions: **View Channels**, **Send Messages**, **Embed Links**, **Read Message History**, **Connect**, **Speak**, and **Use Voice Activity**.
+6. Open the install link, choose **Add to server**, and select your server.
+
+Discord's [bot setup guide](https://docs.discord.com/developers/quick-start/getting-started) explains the portal settings in more detail. Keep your token in your local `.env` file; never include it in a commit or issue.
+
+### 2. Download and configure botcito
+
+With Git and Docker Compose installed, run:
 
 ```bash
+git clone https://github.com/danxvv/botcito.git
+cd botcito
 cp .env.example .env
 ```
 
-Set `DISCORD_TOKEN` in `.env` (see [Bot Setup](#bot-setup)), then start the bot:
-
-```bash
-docker compose up -d
-```
-
-Compose builds the image on the first run. Python, FFmpeg, Node.js, and the locked Python dependencies are included; no local Python installation is needed. The bot restarts automatically unless you stop it. It only makes outbound connections, so no ports need to be published.
-
-```bash
-# Follow the bot's logs
-docker compose logs -f bot
-
-# Rebuild and restart after updating the code or uv.lock
-docker compose up -d --build
-
-# Open the audit TUI for the running bot
-docker compose exec bot audit
-
-# Stop the bot (keeps saved data)
-docker compose down
-```
-
-Ratings and audit history are stored in the `bot-data` Docker volume mounted at `/app/data`, and survive container rebuilds and `docker compose down`. This is separate from a local checkout's `data/` directory. The audio cache uses the same directory but is cleared by the bot on startup. `docker compose down -v` deletes the volume and its saved data.
-
-`.env`, `cookies.txt`, and local data are excluded from the image. Compose passes `DISCORD_TOKEN` at runtime and also supports `SYNC_COMMANDS=0` in `.env` to skip slash command synchronization.
-
-## Local requirements
-
-- Python 3.10+
-- [FFmpeg](https://ffmpeg.org/download.html) for audio playback
-- [Deno](https://deno.land), [Node.js](https://nodejs.org), or [Bun](https://bun.sh) for yt-dlp YouTube extraction
-- [uv](https://docs.astral.sh/uv/) for Python dependency management
-
-## Local installation
-
-```bash
-git clone https://github.com/yourusername/discordbotcito.git
-cd discordbotcito
-uv sync
-cp .env.example .env
-```
-
-Edit `.env`:
+Open `.env` and replace the placeholder with your bot token:
 
 ```env
 DISCORD_TOKEN=your_bot_token_here
 ```
 
-Run the bot:
+### 3. Start the bot
 
 ```bash
-uv run python main.py
+docker compose up -d --build
+docker compose logs -f bot
 ```
 
-## Listening to music
+Wait for `Logged in as ...` in the logs. Press **Ctrl+C** to stop following logs; the bot keeps running in the background. It restarts automatically unless you stop it, and no ports need to be published.
 
-1. Join a voice channel and use `/play`. Choose an autocomplete suggestion, enter a song name, or paste a YouTube URL.
-2. A link containing both a video and a playlist offers **This song** and **Entire playlist**. Playlist playback starts with the first available song while the rest load; the progress message reports added and unavailable tracks.
-3. Use the shared player card to pause, skip, change volume, stop, or enable autoplay. Its controls stay active throughout the session. `/nowplaying` links back to that card.
-4. Use `/queue` for pages of songs and their requesters. Select a song to **Play next**, **Move**, or **Remove** it. Waiting times are approximate and are omitted while paused, preparing, or following a live stream.
+Join a Discord voice channel, then type `/play` in a text channel and enter a song name in the `query` field. You're ready to listen.
 
-Requests have a **Cancel request** button. Once a song is preparing in the player, **Cancel song** or `/skip` moves on immediately. `/clearqueue` also cancels pending imports; `/stop` cancels pending requests, clears the queue, and disconnects. Music commands are server-only, and requests from another voice channel cannot move the bot away from an existing session.
+## Listen together
 
-Audio already in the cache plays locally. Otherwise, the bot waits up to three seconds for the download before streaming; metadata lookup and connection time are additional. Upcoming audio is downloaded when the queue changes. Interrupted playback gets one retry from the beginning, followed by a visible skip notice if it fails again. The player card and queue belong to the running session; a bot restart starts a new session.
+1. **Add music:** use `/play` with a song name, YouTube video, or playlist URL. A link containing both a video and a playlist lets you choose **This song** or **Entire playlist**.
+2. **Control playback:** use the shared player card for pause/resume, skip, volume, ratings, and autoplay. `/nowplaying` takes you back to it.
+3. **Arrange the queue:** run `/queue`, select a song, then choose **Play next**, **Move**, or **Remove**. Pages show who requested each song and an estimated wait when available.
+4. **Keep it going:** enable `/autoplay` for recommendations when your queue runs out. Like or dislike the current song to influence future recommendations.
+5. **Finish the session:** `/stop` cancels pending requests, clears the queue, and disconnects. The bot also leaves after five minutes of inactivity.
+
+Changed your mind? Use **Cancel request** while a search or playlist is loading, or **Cancel song** / `/skip` while a track is preparing. `/clearqueue` cancels pending imports and clears upcoming songs while the current track keeps playing.
+
+Playback commands work in server channels. Join the bot's voice channel to control an active session; requests from another voice channel cannot move it away.
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `/play <query>` | Play a song by name, URL, or playlist URL |
-| `/skip` | Skip playback or cancel the song being prepared |
-| `/stop` | Cancel requests, clear queue, and disconnect |
+In the tables below, `<...>` means required and `[...]` means optional. Discord displays these as command fields.
+
+### Playback
+
+| Command | What it does |
+| --- | --- |
+| `/play <query>` | Play or queue a song, search result, or YouTube playlist |
+| `/nowplaying` | Open the shared player card |
 | `/pause` | Pause the current song |
-| `/resume` | Resume paused playback |
-| `/queue` | Browse and edit the queue with song selections |
-| `/nowplaying` | Open the shared music player |
-| `/volume <percent>` | Set playback volume |
-| `/remove <position>` | Remove a queued song |
-| `/move <from> <to>` | Move a queued song |
-| `/clearqueue` | Clear queued songs and cancel imports without stopping the current track |
+| `/resume` | Resume playback |
+| `/skip` | Skip the current song or cancel its preparation |
+| `/volume <percent>` | Set the volume from 0 to 100 |
+| `/stop` | Cancel requests, clear the queue, and disconnect |
+
+### Queue and discovery
+
+| Command | What it does |
+| --- | --- |
+| `/queue` | Browse and edit the queue |
+| `/remove <position>` | Remove a queued song by its position |
+| `/move <from_position> <to_position>` | Move a song to another queue position |
+| `/shuffle` | Shuffle upcoming songs |
+| `/clearqueue` | Clear upcoming songs and cancel pending imports |
 | `/history` | Show recently played songs |
-| `/replay [position]` | Replay a song from recent history |
-| `/autoplay [action]` | Toggle, inspect, or refresh autoplay |
-| `/clearhistory` | Clear autoplay history |
-| `/shuffle` | Shuffle the current queue |
-| `/stats` | View your music listening statistics |
-| `/leaderboard` | View the server music leaderboard |
+| `/replay [position]` | Queue a song from `/history`; defaults to position 1 |
+| `/autoplay [action]` | Toggle autoplay, check its status, or refresh recommendations |
+| `/clearhistory` | Reset autoplay's recent-song history so songs can repeat |
+
+### Ratings and stats
+
+| Command | What it does |
+| --- | --- |
 | `/like` | Like the current song |
 | `/dislike` | Dislike the current song |
 | `/unrate` | Remove your rating for the current song |
-| `/favorites` | Show your liked songs |
+| `/favorites` | Show your recently liked songs |
+| `/stats [period]` | View your listening statistics |
+| `/leaderboard [period]` | View the server's music leaderboard |
 
-## Bot Setup
+Stats and leaderboard periods are **Last 24 hours**, **Last 7 days**, **Last 30 days**, or **All time** (the default).
 
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications).
-2. Create a new application and bot.
-3. Copy the bot token into `.env`.
-4. In **OAuth2 > URL Generator**, select scopes `bot` and `applications.commands`.
-5. Select permissions `View Channels`, `Send Messages`, `Embed Links`, `Read Message History`, `Connect`, `Speak`, and `Use Voice Activity`.
-6. Use the generated URL to invite the bot to your server.
+## Run locally
 
-## Developer Notes
+Install [uv](https://docs.astral.sh/uv/), [FFmpeg](https://ffmpeg.org/download.html), and one JavaScript runtime: [Deno](https://deno.land), [Node.js](https://nodejs.org), or [Bun](https://bun.sh). Python 3.10+ is supported; the checkout pins Python 3.13.13 in `.python-version`, which `uv` can provision.
+
+After [creating your Discord bot](#1-create-your-discord-bot), clone and configure the project if you haven't already:
 
 ```bash
-# Install/update dependencies
+git clone https://github.com/danxvv/botcito.git
+cd botcito
+cp .env.example .env
 uv sync
-
-# Run the bot
-uv run python main.py
-
-# Run the audit TUI
-uv run audit
-
-# Syntax check
-uv run python -m compileall main.py commands audit audio_cache.py autoplay.py music_player.py ratings.py youtube.py
-
-# Offline regression tests (no Discord connection or YouTube downloads)
-uv run pytest tests/
 ```
 
-Key modules:
+Set `DISCORD_TOKEN` in `.env`, then start the bot:
 
-- `main.py`: Discord client setup and slash command registration.
-- `commands/music.py`: Playback and queue slash commands.
-- `commands/music_requests.py`: Search selection, cancellation, and incremental playlist loading.
-- `commands/player_view.py`: Shared player card and session controls.
-- `commands/queue_view.py`: Paginated queue with stable song selections.
-- `commands/stats.py`: Music stats and song rating commands.
-- `music_player.py`: Per-guild player state, playback, autoplay, and voice connection handling.
-- `youtube.py`: Async wrappers around yt-dlp extraction.
-- `autoplay.py`: YouTube Music search and recommendations.
-- `ratings.py`: SQLite-backed song ratings.
-- `audit/`: Command and music logging plus the audit TUI.
+```bash
+uv run python main.py
+```
 
-Runtime SQLite files are created under `data/`.
+Keep this process running while you use the bot. Press **Ctrl+C** to stop it.
+
+## Configuration and maintenance
+
+| Variable | Required? | Purpose |
+| --- | --- | --- |
+| `DISCORD_TOKEN` | Yes | The token from your application's **Bot** page |
+| `SYNC_COMMANDS` | No | Defaults to `1`; set to `0` to skip slash command synchronization on startup |
+
+Run these commands from the project folder:
+
+```bash
+# Update a Docker installation
+git pull --ff-only
+docker compose up -d --build
+
+# Follow logs
+docker compose logs -f bot
+
+# Open the audit viewer in your terminal
+docker compose exec bot audit
+
+# Stop the bot and keep saved data
+docker compose down
+```
+
+For a local installation, stop the bot, run `git pull --ff-only` and `uv sync`, then start it again. Open the local audit viewer with `uv run audit`.
+
+### What gets saved?
+
+Ratings and audit history use SQLite databases (`ratings.db` and `audit.db`). Local runs save them under `data/`; Docker stores them in the `bot-data` volume at `/app/data`, separately from the local folder.
+
+Docker rebuilds and `docker compose down` preserve saved data. **`docker compose down -v` deletes the volume and its saved data.** The audio cache is temporary and cleared on startup. Queues and player cards belong to the running session, so restarting the bot starts a new session.
+
+### Playback details
+
+Cached audio plays locally. Otherwise, the bot waits up to three seconds for a download before falling back to streaming; searching and connecting may take additional time. It also downloads upcoming tracks in advance. Interrupted playback gets one retry from the beginning, then a visible skip notice if it fails again.
+
+## Troubleshooting
+
+| Problem | What to check |
+| --- | --- |
+| The bot is offline | Check the logs and confirm `.env` contains a valid `DISCORD_TOKEN`. For local runs, keep the terminal process running. |
+| Slash commands are missing | Confirm the bot was installed with `applications.commands`, leave `SYNC_COMMANDS` at `1`, and check startup logs for sync errors. |
+| The bot cannot join or speak | Join a voice channel and check its **Connect** and **Speak** permissions, including channel overrides. |
+| The player card cannot appear | Check **View Channels**, **Send Messages**, and **Embed Links** in the text channel. |
+| A song fails to play | Try another public YouTube video and check the logs. For local runs, verify FFmpeg and a supported JavaScript runtime are on your `PATH`. |
+| Controls belong to an old session | Run `/play` to start a session, then `/nowplaying` to open its player card. |
+
+Still stuck? [Open an issue](https://github.com/danxvv/botcito/issues) with what you tried, your setup (Docker or local), and relevant logs with tokens and private information removed.
+
+## Contributing
+
+Bug reports, documentation improvements, tests, and code contributions are welcome. For a larger feature, open an issue first so we can agree on the scope.
+
+### Make your first change
+
+1. Fork this repository, clone your fork, and create a branch for your change.
+2. Run `uv sync` to install the project and development dependencies.
+3. Make a focused change and follow the conventions in [AGENTS.md](AGENTS.md): readable Python, type hints for new or updated functions, and small, purposeful helpers.
+4. Run the checks below. Add or update offline regression tests when changing behavior, and update the README when setup or commands change.
+5. Push your branch and open a pull request against `master`. Explain the problem, what changed, and how you verified it. Include screenshots for Discord interface changes when useful.
+
+```bash
+# Run from the repository root
+uv run pytest tests/
+uv run python -m compileall main.py commands audit audio_cache.py autoplay.py music_player.py ratings.py youtube.py
+
+# Run just the playback tests while working on that area
+uv run pytest tests/test_playback.py -v
+```
+
+The regression suite uses fake voice clients and mocked extraction, so tests need no Discord token, live Discord connection, or YouTube downloads. To try the bot itself, follow [Run locally](#run-locally) with your own bot and test server. Keep `.env`, `cookies.txt`, and runtime data out of commits.
+
+### Find your way around
+
+| Path | Responsibility |
+| --- | --- |
+| `main.py` | Bot startup and slash command registration |
+| `commands/music.py` | Playback and queue commands |
+| `commands/music_requests.py` | Search selection, cancellation, and playlist loading |
+| `commands/player_view.py`, `commands/queue_view.py` | Interactive player and queue controls |
+| `commands/stats.py` | Stats, leaderboard, and song ratings |
+| `music_player.py` | Per-server state, playback, autoplay, and voice connections |
+| `youtube.py`, `audio_cache.py` | YouTube extraction and audio caching |
+| `autoplay.py`, `ratings.py` | Recommendations and saved ratings |
+| `audit/` | Event logging, database, and terminal viewer |
+| `tests/` | Offline regression tests |
