@@ -2,7 +2,7 @@
 
 FROM node:24-bookworm-slim AS node
 FROM ghcr.io/astral-sh/uv:0.11.15 AS uv
-FROM python:3.13.13-slim-bookworm
+FROM python:3.14.7-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
