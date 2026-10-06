@@ -2,19 +2,30 @@
 
 import asyncio
 import logging
+import math
 import os
 import shutil
 
 import discord
+import yt_dlp.version
 from discord import app_commands
+from discord.ext import tasks
 from dotenv import load_dotenv
 
+from health import (
+    HEARTBEAT_INTERVAL,
+    YTDLP_MAX_AGE_DAYS,
+    clear_heartbeat,
+    write_heartbeat,
+    ytdlp_age_days,
+)
 from music_player import player_manager
 
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 SYNC_COMMANDS = os.getenv("SYNC_COMMANDS", "1") != "0"
+logger = logging.getLogger(__name__)
 
 
 class MusicBot(discord.Client):
@@ -34,19 +45,27 @@ class MusicBot(discord.Client):
         await asyncio.to_thread(audio_cache.clear_stale_files)
         setup_commands(self)
         self.tree.on_error = self.on_command_error
+        clear_heartbeat()
+        self.heartbeat.start()
         if SYNC_COMMANDS:
             try:
                 await self.tree.sync()
-                print(f"Synced {len(self.tree.get_commands())} commands")
+                logger.info("Synced %d commands", len(self.tree.get_commands()))
             except discord.HTTPException as e:
-                print(f"Warning: could not sync slash commands: {e}")
+                logger.warning("Could not sync slash commands: %s", e)
         else:
-            print("Skipped slash command sync (SYNC_COMMANDS=0)")
+            logger.info("Skipped slash command sync (SYNC_COMMANDS=0)")
+
+    @tasks.loop(seconds=HEARTBEAT_INTERVAL)
+    async def heartbeat(self) -> None:
+        """Refresh the file the container health check reads while Discord is reachable."""
+        if self.is_ready() and not self.is_closed() and math.isfinite(self.latency):
+            await asyncio.to_thread(write_heartbeat)
 
     async def on_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         from commands.helpers import respond
 
-        logging.getLogger(__name__).error("Music command failed", exc_info=error)
+        logger.error("Music command failed", exc_info=error)
         message = "That command could not complete. Try again, or use /nowplaying to check the player."
         if isinstance(getattr(error, "original", error), discord.Forbidden):
             message = "I need permission to send messages and embeds here, and to connect and speak in your voice channel."
@@ -59,6 +78,7 @@ class MusicBot(discord.Client):
         from audio_cache import audio_cache
         from commands.player_view import panels
 
+        self.heartbeat.cancel()
         for guild_id in list(player_manager.players):
             await player_manager.disconnect(guild_id)
         await panels.close()
@@ -75,8 +95,7 @@ client = MusicBot()
 @client.event
 async def on_ready():
     """Called when bot is ready."""
-    print(f"Logged in as {client.user} (ID: {client.user.id})")
-    print("------")
+    logger.info("Logged in as %s (ID: %s)", client.user, client.user.id)
 
 
 @client.event
@@ -85,13 +104,18 @@ async def on_voice_state_update(
     before: discord.VoiceState,
     after: discord.VoiceState,
 ):
-    """Handle voice state changes (e.g., bot alone in channel)."""
+    """Handle the bot being disconnected, and everyone leaving the bot's channel."""
+    guild_id = member.guild.id
+    player = player_manager.players.get(guild_id)
+    if not player or not player.voice_client:
+        return
     # Check if the bot was disconnected
     if member.id == client.user.id and after.channel is None and before.channel:
-        guild_id = before.channel.guild.id
-        player = player_manager.get_player(guild_id)
-        if player.voice_client and player.voice_client.channel.id == before.channel.id:
+        if player.voice_client.channel.id == before.channel.id:
             await player_manager.cleanup_external_disconnect(guild_id)
+        return
+    # Someone joined, left, or moved: start or stop the empty-channel countdown.
+    player_manager.check_listeners(guild_id)
 
 
 # ============== Dependency Check ==============
@@ -112,22 +136,40 @@ def check_dependencies() -> list[str]:
 # ============== Entry Point ==============
 
 
+def configure_logging() -> None:
+    """Send every module's logs, including yt-dlp's, to stderr at LOG_LEVEL (default INFO)."""
+    level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+    logging.basicConfig(
+        level=level if isinstance(level, int) else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+
 def main():
     """Run the bot."""
+    configure_logging()
     if not TOKEN:
-        print("Error: DISCORD_TOKEN not found in environment variables.")
-        print("Create a .env file with: DISCORD_TOKEN=your_token_here")
+        logger.error(
+            "DISCORD_TOKEN not found in environment variables. "
+            "Create a .env file with: DISCORD_TOKEN=your_token_here"
+        )
         return
 
     # Check external dependencies
-    missing_deps = check_dependencies()
-    if missing_deps:
-        print("Warning: Missing external dependencies:")
-        for dep in missing_deps:
-            print(f"  - {dep}")
-        print()
+    for dep in check_dependencies():
+        logger.warning("Missing external dependency: %s", dep)
 
-    client.run(TOKEN)
+    age = ytdlp_age_days(yt_dlp.version.__version__)
+    if age is not None and age > YTDLP_MAX_AGE_DAYS:
+        logger.warning(
+            "yt-dlp %s is %d days old and YouTube changes often; "
+            "update it (uv lock --upgrade-package yt-dlp) and rebuild if playback fails.",
+            yt_dlp.version.__version__,
+            age,
+        )
+
+    # Logging is configured above, so discord.py must not install a second handler.
+    client.run(TOKEN, log_handler=None)
 
 
 if __name__ == "__main__":

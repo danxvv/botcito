@@ -215,6 +215,24 @@ def get_guild_song_count(guild_id: int, hours: int = 24) -> int:
         return row["count"] if row else 0
 
 
+def get_skip_counts(guild_id: int, hours: int = 720) -> dict[str, int]:
+    """Count recent skips per video in a guild, as a signal of songs people do not want."""
+    since = _since(hours)
+
+    try:
+        with get_connection() as conn:
+            rows = conn.execute("""
+                SELECT video_id, COUNT(*) as skips
+                FROM music_logs
+                WHERE guild_id = ? AND timestamp > ? AND action = 'skip'
+                GROUP BY video_id
+            """, (guild_id, since)).fetchall()
+    except sqlite3.OperationalError:
+        # The audit tables are created on first use; before that there is nothing to count.
+        return {}
+    return {row["video_id"]: row["skips"] for row in rows}
+
+
 def get_user_song_count(user_id: int, guild_id: int | None = None, hours: int = 24) -> int:
     """Get song count for a specific user."""
     since = _since(hours)

@@ -2,8 +2,8 @@
 
 import asyncio
 import logging
+import os
 import random
-import subprocess
 import time
 from collections import deque
 from collections.abc import Callable
@@ -11,11 +11,13 @@ from dataclasses import dataclass, field
 
 import discord
 
+from audit.database import get_skip_counts
 from audit.logger import AuditLogger
 from audio_cache import audio_cache
 from autoplay import YouTubeMusicHandler
+from background import spawn
 from ratings import get_guild_ratings
-from youtube import SongInfo, extract_song_info
+from youtube import SongInfo, ensure_resolved, extract_song_info
 
 
 # Number of recent songs to track for blended recommendations
@@ -36,6 +38,7 @@ class GuildPlayer:
     start_token: int = 0
     stopping: bool = False
     song_start_time: float | None = None
+    song_offset: float = 0.0  # Seconds into the song where this playback began (seek/resume)
     paused_at: float | None = None
     total_paused_time: float = 0.0
     ytmusic: YouTubeMusicHandler = field(default_factory=YouTubeMusicHandler)
@@ -43,6 +46,7 @@ class GuildPlayer:
     recent_songs: deque[str] = field(default_factory=deque)  # Recent video IDs for blended recommendations
     volume: float = 1.0  # Volume level (0.0 to 1.0)
     _disconnect_task: asyncio.Task | None = field(default=None, repr=False)
+    _empty_task: asyncio.Task | None = field(default=None, repr=False)
     _prefetch_task: asyncio.Task | None = field(default=None, repr=False)
     session_id: int = 0
     notice: str = ""
@@ -68,6 +72,9 @@ def _get_ffmpeg_before_options() -> str:
 FFMPEG_BEFORE_OPTIONS = _get_ffmpeg_before_options()
 # Output options for audio conversion
 FFMPEG_OPTIONS = "-vn -bufsize 64k"
+# FFmpeg's diagnostics are discarded. discord.py needs a real file object here: given
+# subprocess.DEVNULL (an int) it starts a stderr reader that fails on its first write.
+_FFMPEG_STDERR = open(os.devnull, "wb")
 
 # Auto-disconnect timeout in seconds
 DISCONNECT_TIMEOUT = 300  # 5 minutes
@@ -75,14 +82,66 @@ DISCONNECT_TIMEOUT = 300  # 5 minutes
 # Number of autoplay songs to keep pre-fetched
 AUTOPLAY_PREFETCH_COUNT = 3
 
+# Disconnect after everyone has left the voice channel, even while autoplay has music ready.
+EMPTY_CHANNEL_TIMEOUT = 60
+
 # Keep queues bounded so large playlists cannot exhaust memory.
 MAX_QUEUE_LENGTH = 200
+
+# Songs this close to the front of the queue are downloaded ahead of time.
+PREFETCH_QUEUE_AHEAD = 2
+
+# Autoplay ranking: every SKIPS_PER_DISLIKE recent skips count as one dislike (at most
+# MAX_SKIP_PENALTY), and songs scoring at or below DISLIKE_EXCLUDE_AT are never recommended.
+SKIP_LOOKBACK_HOURS = 24 * 30
+SKIPS_PER_DISLIKE = 2
+MAX_SKIP_PENALTY = 3
+DISLIKE_EXCLUDE_AT = -2
+
+# When autoplay runs out of unplayed recommendations, forget all but this many recent songs.
+AUTOPLAY_HISTORY_KEEP = 25
+
+
+class SongUnavailableError(Exception):
+    """The song cannot be played, so retrying it would not help."""
 
 
 def _cancel_task(task: asyncio.Task | None) -> None:
     """Cancel a task if it exists and is not done."""
     if task and not task.done():
         task.cancel()
+
+
+def count_listeners(channel: discord.VoiceChannel, bot_id: int) -> int:
+    """Count the people in a voice channel; users that are not cached count as people."""
+    count = 0
+    for user_id in channel.voice_states:
+        if user_id == bot_id:
+            continue
+        member = channel.guild.get_member(user_id)
+        if member is None or not member.bot:
+            count += 1
+    return count
+
+
+def rank_recommendations(
+    recommendations: list[dict], ratings: dict[str, int], skips: dict[str, int]
+) -> list[dict]:
+    """Order recommendations by the server's taste and drop clearly disliked songs.
+
+    Ratings count in full; every SKIPS_PER_DISLIKE recent skips count as one dislike.
+    Songs that tie keep the order they were recommended in.
+    """
+
+    def score(rec: dict) -> int:
+        video_id = rec["videoId"]
+        penalty = min(skips.get(video_id, 0) // SKIPS_PER_DISLIKE, MAX_SKIP_PENALTY)
+        return ratings.get(video_id, 0) - penalty
+
+    scored = [(score(rec), rec) for rec in recommendations]
+    kept = [(value, rec) for value, rec in scored if value > DISLIKE_EXCLUDE_AT]
+    kept.sort(key=lambda item: -item[0])
+    return [rec for _, rec in kept]
 
 
 class MusicPlayerManager:
@@ -136,13 +195,13 @@ class MusicPlayerManager:
             self.changed(guild_id)
             return player.voice_client
 
-    async def disconnect(self, guild_id: int) -> None:
+    async def disconnect(self, guild_id: int, reason: str = "") -> None:
         player = self.get_player(guild_id)
         player.stopping = True
         self.cancel_requests(guild_id)
         async with player._connect_lock:
             voice_client = player.voice_client
-            await self.cleanup_external_disconnect(guild_id)
+            await self.cleanup_external_disconnect(guild_id, reason)
             if voice_client:
                 source = voice_client.source
                 voice_client.stop()
@@ -151,7 +210,7 @@ class MusicPlayerManager:
                 if voice_client.is_connected():
                     await voice_client.disconnect()
 
-    async def cleanup_external_disconnect(self, guild_id: int) -> None:
+    async def cleanup_external_disconnect(self, guild_id: int, reason: str = "") -> None:
         player = self.get_player(guild_id)
         player.stopping = True
         player.session_id += 1
@@ -159,6 +218,7 @@ class MusicPlayerManager:
         self.cancel_requests(guild_id)
         _cancel_task(player._play_task)
         self._cancel_disconnect_timer(player)
+        self._cancel_empty_timer(player)
         await self._cancel_prefetch(player)
         songs = [s for s in [player.current_song, *player.queue, *player.autoplay_queue] if s]
         player.voice_client = None
@@ -167,11 +227,13 @@ class MusicPlayerManager:
         player.current_song = None
         player.recent_songs.clear()
         player.song_start_time = None
+        player.song_offset = 0.0
         player.paused_at = None
         player.total_paused_time = 0.0
         player.is_starting = False
         player.phase = "disconnected"
-        player.notice = "Session ended. Use /play to start listening again."
+        ended = f"Session ended ({reason})" if reason else "Session ended"
+        player.notice = f"{ended}. Use /play to start listening again."
         player.ytmusic.clear_history()
         for song in songs:
             audio_cache.release(song)
@@ -199,6 +261,9 @@ class MusicPlayerManager:
             player.queue.append(song)
             audio_cache.retain(song)
             self._prefetch_next_audio(player)
+            if len(player.queue) > PREFETCH_QUEUE_AHEAD:
+                # Too far back to download soon; by then the extraction would be stale.
+                song.info = None
             self.changed(guild_id)
             return len(player.queue)
 
@@ -212,10 +277,13 @@ class MusicPlayerManager:
 
         return None
 
-    def _set_current_song(self, player: GuildPlayer, song: SongInfo) -> None:
+    def _set_current_song(
+        self, player: GuildPlayer, song: SongInfo, start_at: float = 0.0
+    ) -> None:
         """Update current song bookkeeping."""
         player.current_song = song
         player.song_start_time = None
+        player.song_offset = start_at
         player.paused_at = None
         player.total_paused_time = 0.0
         player.ytmusic.mark_played(song.video_id)
@@ -227,7 +295,7 @@ class MusicPlayerManager:
 
     def _log_play(self, guild_id: int, song: SongInfo) -> None:
         """Write a play event after playback successfully starts."""
-        asyncio.create_task(
+        spawn(
             asyncio.to_thread(
                 AuditLogger.log_music,
                 guild_id,
@@ -239,17 +307,26 @@ class MusicPlayerManager:
                 song.duration,
                 song.source_type,
                 "play",
-            )
+            ),
+            name="log-play",
         )
 
     async def _create_audio_source(
-        self, song: SongInfo, player: GuildPlayer, *, retry: bool = False
+        self,
+        song: SongInfo,
+        player: GuildPlayer,
+        *,
+        retry: bool = False,
+        start_at: float = 0.0,
     ) -> discord.PCMVolumeTransformer:
         audio_cache.protect(song)
         downloaded = await audio_cache.ensure_downloaded(song)
         if downloaded:
             audio_source = song.local_path
         else:
+            # Lazily imported songs are extracted here, once, if the download has not done it.
+            if not await ensure_resolved(song):
+                raise SongUnavailableError(song.title)
             if retry or time.monotonic() - song.extracted_at > 300:
                 fresh = await extract_song_info(song.webpage_url)
                 if not fresh:
@@ -259,19 +336,28 @@ class MusicPlayerManager:
             if not song.url.startswith("http"):
                 raise ValueError("No playable audio URL.")
             audio_source = song.url
+        # The download (if any) is finished or abandoned; the extraction data is no longer needed.
+        song.info = None
+        before_options = FFMPEG_BEFORE_OPTIONS if audio_source.startswith("http") else ""
+        if start_at >= 1:
+            before_options = f"-ss {int(start_at)} {before_options}".strip()
         source = discord.FFmpegPCMAudio(
             audio_source,
-            before_options=FFMPEG_BEFORE_OPTIONS if audio_source.startswith("http") else None,
+            before_options=before_options or None,
             options=FFMPEG_OPTIONS,
-            stderr=subprocess.DEVNULL,
+            stderr=_FFMPEG_STDERR,
         )
         return discord.PCMVolumeTransformer(source, volume=player.volume)
 
-    async def _play_song(self, guild_id: int, song: SongInfo, token: int, retry: bool) -> bool:
+    async def _play_song(
+        self, guild_id: int, song: SongInfo, token: int, retry: bool, start_at: float = 0.0
+    ) -> bool:
         player = self.get_player(guild_id)
         source = None
         try:
-            source = await self._create_audio_source(song, player, retry=retry)
+            source = await self._create_audio_source(
+                song, player, retry=retry, start_at=start_at
+            )
             if player.start_token != token or not player.voice_client:
                 return False
             loop = asyncio.get_running_loop()
@@ -284,6 +370,7 @@ class MusicPlayerManager:
             player.voice_client.play(source, after=after)
             source = None  # The voice client now owns cleanup.
             player.song_start_time = time.time()
+            player.song_offset = float(start_at)
             player.is_starting = False
             player.phase = "playing"
             if retry:
@@ -308,9 +395,15 @@ class MusicPlayerManager:
         ended_early = song.duration > 0 and elapsed + 5 < song.duration
         failed = error is not None or ended_early or song.is_live
         if failed and not retried:
-            player.notice = f"Playback interrupted for {song.title[:150]}. Retrying once from the beginning…"
+            # Resume where the stream stopped. Live streams have no position to return to,
+            # and a failure in the first seconds is simply restarted.
+            resume_at = 0 if song.is_live or elapsed < 5 else elapsed
+            where = "from where it stopped" if resume_at else "from the beginning"
+            player.notice = f"Playback interrupted for {song.title[:150]}. Retrying once {where}…"
             self.changed(guild_id)
-            player._play_task = asyncio.create_task(self.play_next(guild_id, retry_song=song))
+            player._play_task = asyncio.create_task(
+                self.play_next(guild_id, retry_song=song, start_at=resume_at)
+            )
             return
         if failed:
             player.notice = f"Could not play {song.title[:150]}. Skipped to the next song. Try /play again or choose another result."
@@ -320,7 +413,15 @@ class MusicPlayerManager:
         self.changed(guild_id)
         self.start_playback(guild_id)
 
-    async def play_next(self, guild_id: int, *, retry_song: SongInfo | None = None) -> SongInfo | None:
+    async def play_next(
+        self,
+        guild_id: int,
+        *,
+        retry_song: SongInfo | None = None,
+        start_at: float = 0.0,
+        seeking: bool = False,
+    ) -> SongInfo | None:
+        """Start the next song, or restart `retry_song` at `start_at` (a retry, or a seek)."""
         player = self.get_player(guild_id)
         if self.is_playing(guild_id):
             return player.current_song
@@ -332,8 +433,10 @@ class MusicPlayerManager:
             while player.voice_client and player.voice_client.is_connected() and not player.stopping:
                 self._cancel_disconnect_timer(player)
                 song = retry_song or self._get_next_song(guild_id, player)
-                retry = retry_song is not None
-                retry_song = None
+                resumed = retry_song is not None
+                retry = resumed and not seeking
+                position = start_at if resumed else 0.0
+                retry_song, start_at, seeking = None, 0.0, False
                 if not song and player.autoplay_enabled:
                     player.phase = "preparing"
                     self.changed(guild_id)
@@ -343,22 +446,30 @@ class MusicPlayerManager:
                     player.phase = "idle"
                     self._start_disconnect_timer(guild_id, player)
                     return None
-                self._set_current_song(player, song)
+                self._set_current_song(player, song, position)
                 player.phase = "retrying" if retry else "preparing"
                 self.changed(guild_id)
+                unavailable = False
                 for attempt in range(1 if retry else 2):
                     try:
-                        if await self._play_song(guild_id, song, token, retry or attempt > 0):
-                            if not retry:
+                        if await self._play_song(guild_id, song, token, retry or attempt > 0, position):
+                            if not resumed:
                                 self._log_play(guild_id, song)
                             return song
                         return None
+                    except SongUnavailableError:
+                        logger.warning("Song %s is unavailable", song.video_id)
+                        unavailable = True
+                        break
                     except Exception:
                         logger.exception("Could not start %s", song.video_id)
                         player.phase = "retrying"
                         player.notice = f"Having trouble starting {song.title[:150]}. Retrying…"
                         self.changed(guild_id)
-                player.notice = f"Could not play {song.title[:150]}. Skipping it; try another result with /play."
+                if unavailable:
+                    player.notice = f"{song.title[:150]} is unavailable. Skipped to the next song."
+                else:
+                    player.notice = f"Could not play {song.title[:150]}. Skipping it; try another result with /play."
                 audio_cache.release(song)
                 player.current_song = None
         except asyncio.CancelledError:
@@ -380,7 +491,7 @@ class MusicPlayerManager:
         """Start background download for next songs in queue."""
         # Prefetch from regular queue first
         for i, next_song in enumerate(player.queue):
-            if i >= 2:  # Only prefetch first 2
+            if i >= PREFETCH_QUEUE_AHEAD:
                 break
             if not audio_cache.is_ready(next_song.video_id):
                 audio_cache.start_background_download(next_song)
@@ -403,16 +514,27 @@ class MusicPlayerManager:
         if player.autoplay_queue:
             return player.autoplay_queue.popleft()
 
-        # Use blended recommendations from recent songs
-        recommendations = await self._get_blended_recommendations(guild_id, player, limit=5)
+        song = await self._song_from_recommendations(guild_id, player)
+        if song is None and player.ytmusic.forget_older(AUTOPLAY_HISTORY_KEEP):
+            # Everything recommended has already been played: allow older songs again.
+            song = await self._song_from_recommendations(guild_id, player)
+            if song:
+                player.notice = "Autoplay ran out of new songs, so it is mixing earlier ones back in."
+        if song is None and player.autoplay_enabled:
+            player.notice = "Autoplay could not find anything new. Add songs with /play or try /autoplay refresh."
+        return song
 
+    async def _song_from_recommendations(
+        self, guild_id: int, player: GuildPlayer
+    ) -> SongInfo | None:
+        """Extract the first recommendation that can be played."""
+        recommendations = await self._get_blended_recommendations(guild_id, player, limit=5)
         for rec in recommendations:
             song = await extract_song_info(rec["videoId"])
             if song:
                 song.guild_name = player.guild_name
                 song.source_type = "autoplay"
                 return song
-
         return None
 
     def _start_prefetch(self, guild_id: int, player: GuildPlayer) -> None:
@@ -464,19 +586,10 @@ class MusicPlayerManager:
                     seen_ids.add(rec["videoId"])
                     all_recs.append(rec)
 
-        # Sort by guild ratings: positive first, neutral middle, heavily disliked last
+        # Favor what the server likes, and drop songs it dislikes or keeps skipping.
         ratings = await asyncio.to_thread(get_guild_ratings, guild_id)
-
-        # Thresholds: positive (>0) = group 0, neutral (0) = 1, disliked (-1) = 2, heavily disliked (<=-2) = 3
-        _GROUP_THRESHOLDS = [(1, 0), (0, 1), (-1, 2)]
-
-        def rating_sort_key(rec: dict) -> tuple[int, int]:
-            score = ratings.get(rec["videoId"], 0)
-            group = next((g for threshold, g in _GROUP_THRESHOLDS if score >= threshold), 3)
-            return (group, -score)
-
-        all_recs.sort(key=rating_sort_key)
-        return all_recs[:limit]
+        skips = await asyncio.to_thread(get_skip_counts, guild_id, SKIP_LOOKBACK_HOURS)
+        return rank_recommendations(all_recs, ratings, skips)[:limit]
 
     async def _prefetch_autoplay(
         self, guild_id: int, player: GuildPlayer, count: int = AUTOPLAY_PREFETCH_COUNT
@@ -524,7 +637,7 @@ class MusicPlayerManager:
             async def disconnect_after_timeout():
                 await asyncio.sleep(DISCONNECT_TIMEOUT)
                 player._disconnect_task = None
-                await self.disconnect(guild_id)
+                await self.disconnect(guild_id, "nothing was played for a while")
 
             player._disconnect_task = asyncio.create_task(disconnect_after_timeout())
 
@@ -533,6 +646,37 @@ class MusicPlayerManager:
         if player._disconnect_task is not asyncio.current_task():
             _cancel_task(player._disconnect_task)
         player._disconnect_task = None
+
+    def check_listeners(self, guild_id: int) -> None:
+        """Start or stop the empty-channel countdown from who is in the voice channel now."""
+        player = self.players.get(guild_id)
+        if not player:
+            return
+        voice_client = player.voice_client
+        if not voice_client or not voice_client.is_connected():
+            self._cancel_empty_timer(player)
+            return
+        if count_listeners(voice_client.channel, voice_client.user.id):
+            self._cancel_empty_timer(player)
+        elif player._empty_task is None or player._empty_task.done():
+            self._start_empty_timer(guild_id, player)
+
+    def _start_empty_timer(self, guild_id: int, player: GuildPlayer) -> None:
+        """Disconnect after everyone has left, whatever is still queued or playing."""
+
+        async def leave_empty_channel() -> None:
+            await asyncio.sleep(EMPTY_CHANNEL_TIMEOUT)
+            player._empty_task = None
+            logger.info("Leaving the empty voice channel in server %s", guild_id)
+            await self.disconnect(guild_id, "everyone left the voice channel")
+
+        player._empty_task = asyncio.create_task(leave_empty_channel())
+
+    def _cancel_empty_timer(self, player: GuildPlayer) -> None:
+        """Cancel the empty-channel countdown."""
+        if player._empty_task is not asyncio.current_task():
+            _cancel_task(player._empty_task)
+        player._empty_task = None
 
     def skip(self, guild_id: int) -> bool:
         player = self.get_player(guild_id)
@@ -546,7 +690,7 @@ class MusicPlayerManager:
             source = player.voice_client.source
             player.voice_client.stop()
             if source:
-                asyncio.create_task(asyncio.to_thread(source.cleanup))
+                spawn(asyncio.to_thread(source.cleanup), name="cleanup-source")
         if song:
             audio_cache.release(song)
         player.current_song = None
@@ -555,6 +699,36 @@ class MusicPlayerManager:
         self.changed(guild_id)
         self.start_playback(guild_id)
         return True
+
+    def seek(self, guild_id: int, seconds: int) -> int | None:
+        """Jump the current song to `seconds` (clamped to the song). Returns the new position.
+
+        Returns None when there is nothing to seek: no song, a live stream, an unknown
+        length, or a song that is still starting.
+        """
+        player = self.get_player(guild_id)
+        song = player.current_song
+        if (
+            not song
+            or not player.voice_client
+            or player.is_starting
+            or song.is_live
+            or song.duration <= 0
+        ):
+            return None
+        position = max(0, min(int(seconds), song.duration - 1))
+        player.start_token += 1  # Ignore completion from the discarded source.
+        _cancel_task(player._play_task)
+        source = player.voice_client.source
+        player.voice_client.stop()
+        if source:
+            spawn(asyncio.to_thread(source.cleanup), name="cleanup-source")
+        player.is_starting = False
+        player._play_task = asyncio.create_task(
+            self.play_next(guild_id, retry_song=song, start_at=position, seeking=True)
+        )
+        self.changed(guild_id)
+        return position
 
     def pause(self, guild_id: int) -> bool:
         """Pause playback. Returns True if paused."""
@@ -751,7 +925,7 @@ class MusicPlayerManager:
             # Currently playing
             elapsed = time.time() - player.song_start_time - player.total_paused_time
 
-        return max(0, int(elapsed))
+        return max(0, int(elapsed + player.song_offset))
 
     def is_paused(self, guild_id: int) -> bool:
         """Check if playback is paused."""

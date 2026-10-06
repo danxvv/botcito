@@ -1,4 +1,4 @@
-"""Music playback commands: play, skip, stop, pause, resume, queue, nowplaying, autoplay, clearhistory, shuffle."""
+"""Music playback commands: play, skip, stop, pause, resume, seek, queue, nowplaying, autoplay, clearhistory, shuffle."""
 
 import asyncio
 
@@ -9,7 +9,13 @@ from audit.database import get_music_history
 from audit.logger import log_command
 from music_player import player_manager
 
-from .helpers import ensure_same_voice, respond, _log_music_event
+from .helpers import (
+    ensure_same_voice,
+    format_clock,
+    parse_seek_position,
+    respond,
+    _log_music_event,
+)
 from .music_requests import request_play, ytmusic
 from .player_view import panels
 from .queue_view import show_queue
@@ -102,6 +108,35 @@ def setup(client: discord.Client) -> None:
             await interaction.response.send_message("Resumed.")
         else:
             await interaction.response.send_message("Nothing is paused.", ephemeral=True)
+
+    @client.tree.command(name="seek", description="Jump to a time in the current song")
+    @app_commands.guild_only()
+    @app_commands.describe(position="A time like 1:30 or 90, or +30 / -15 to move from now")
+    @log_command
+    async def seek(interaction: discord.Interaction, position: str):
+        """Jump to a time in the current song."""
+        guild_id = interaction.guild_id
+        player = player_manager.get_player(guild_id)
+        if not await ensure_same_voice(interaction, player.voice_client):
+            return
+
+        try:
+            target = parse_seek_position(
+                position, player_manager.get_elapsed_seconds(guild_id) or 0
+            )
+        except ValueError:
+            await interaction.response.send_message(
+                "Use a time like 1:30 or 90, or +30 / -15 to move from now.", ephemeral=True
+            )
+            return
+
+        reached = player_manager.seek(guild_id, target)
+        if reached is None:
+            await interaction.response.send_message(
+                "I can only seek in a song that is playing and has a known length.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(f"Jumped to **{format_clock(reached)}**.")
 
     @client.tree.command(name="queue", description="Show the current queue")
     @app_commands.guild_only()

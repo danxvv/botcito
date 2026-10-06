@@ -7,6 +7,8 @@ import discord
 from discord import app_commands
 
 from audit.logger import AuditLogger
+from background import spawn
+from youtube import SongInfo
 
 
 def period_to_hours(period: app_commands.Choice[str] | None) -> int | None:
@@ -17,15 +19,45 @@ def period_to_hours(period: app_commands.Choice[str] | None) -> int | None:
     return period_map.get(period.value)
 
 
-def format_duration(seconds: int) -> str:
-    """Format seconds as MM:SS or HH:MM:SS."""
-    if seconds <= 0:
-        return "Live"
-    minutes, secs = divmod(seconds, 60)
+def format_clock(seconds: int) -> str:
+    """Format a position as M:SS or H:MM:SS."""
+    minutes, secs = divmod(max(0, seconds), 60)
     hours, minutes = divmod(minutes, 60)
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+def format_duration(seconds: int) -> str:
+    """Format a song length as MM:SS or HH:MM:SS; a length of zero means a live stream."""
+    if seconds <= 0:
+        return "Live"
+    return format_clock(seconds)
+
+
+def song_duration_label(song: SongInfo) -> str:
+    """Format a song's length; imported playlist entries have none until they are prepared."""
+    if song.duration <= 0 and not song.resolved:
+        return "…"
+    return format_duration(song.duration)
+
+
+def parse_seek_position(text: str, current: int = 0) -> int:
+    """Parse '1:30', '1:02:03' or '90' into seconds; a leading + or - is relative to `current`.
+
+    Raises ValueError if the text is not a time.
+    """
+    text = text.strip()
+    relative = text[:1] in {"+", "-"}
+    parts = (text[1:] if relative else text).strip().split(":")
+    if len(parts) > 3 or not all(part.isascii() and part.isdigit() for part in parts):
+        raise ValueError(f"Not a time: {text!r}")
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + int(part)
+    if not relative:
+        return seconds
+    return max(0, current + (-seconds if text.startswith("-") else seconds))
 
 
 def render_progress_bar(elapsed: int, total: int, width: int = 20) -> str:
@@ -93,7 +125,7 @@ class MusicView(discord.ui.View):
 def _log_music_event(interaction: discord.Interaction, song, source_type: str, action: str):
     """Log a music audit event, extracting guild/user info from the interaction."""
     guild_name = interaction.guild.name if interaction.guild else "DM"
-    asyncio.create_task(
+    spawn(
         asyncio.to_thread(
             AuditLogger.log_music,
             interaction.guild_id,
@@ -105,5 +137,6 @@ def _log_music_event(interaction: discord.Interaction, song, source_type: str, a
             song.duration,
             source_type,
             action,
-        )
+        ),
+        name="log-music-event",
     )

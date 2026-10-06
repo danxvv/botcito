@@ -71,84 +71,78 @@ def test_ambiguous_url_respects_user_choice(choice, job, manager, song_factory):
     asyncio.run(scenario())
 
 
-def test_playlist_starts_before_later_entries_finish(
-    job, manager, monkeypatch, song_factory
+def test_playlist_is_queued_without_extracting_every_song(
+    job, manager, monkeypatch
 ):
     async def scenario():
         job.query = "https://www.youtube.com/playlist?list=PL123"
-        first, second = song_factory(title="First"), song_factory(title="Second")
         monkeypatch.setattr(
             music_requests,
             "extract_playlist",
-            AsyncMock(return_value=[{"video_id": "first"}, {"video_id": "second"}]),
+            AsyncMock(
+                return_value=[
+                    {"video_id": "first", "title": "First", "duration": 200},
+                    {"video_id": "second", "title": "Second", "duration": 0},
+                    {"video_id": "third", "title": "Third", "duration": 90},
+                ]
+            ),
         )
-        release_second = asyncio.Event()
-
-        async def extract(video_id):
-            if video_id == "first":
-                return first
-            await release_second.wait()
-            return second
-
+        extract = AsyncMock()
         monkeypatch.setattr(music_requests, "extract_song_info", extract)
-        task = asyncio.create_task(job.run())
+        await job.run()
         voice = manager.get_player(1).voice_client
         await asyncio.wait_for(voice.started.wait(), 1)
-        assert manager.get_current_song(1) is first
-        assert not task.done()
-        release_second.set()
-        await task
-        assert manager.get_queue(1) == [second]
-        assert "2" in job.message.edit.call_args.kwargs["content"]
+        extract.assert_not_awaited()
+        current = manager.get_current_song(1)
+        assert (current.title, current.duration, current.resolved) == ("First", 200, False)
+        assert [song.title for song in manager.get_queue(1)] == ["Second", "Third"]
+        assert all(song.source_type == "playlist" for song in manager.get_queue(1))
+        assert job.added == 3
+        assert "**3**" in job.message.edit.call_args.kwargs["content"]
         await manager.disconnect(1)
 
     asyncio.run(scenario())
 
 
-def test_stopping_playlist_prevents_late_entries(
-    job, manager, monkeypatch, song_factory
-):
+def test_stopping_playlist_prevents_late_entries(job, manager, monkeypatch):
     async def scenario():
         job.query = "https://www.youtube.com/playlist?list=PL123"
-        first = song_factory(title="First")
         monkeypatch.setattr(
             music_requests,
             "extract_playlist",
-            AsyncMock(return_value=[{"video_id": "first"}, {"video_id": "second"}]),
+            AsyncMock(
+                return_value=[{"video_id": name} for name in ("first", "second", "third")]
+            ),
         )
+        enqueue, calls = job.enqueue, []
 
-        async def extract(video_id):
-            if video_id == "first":
-                return first
-            await asyncio.Event().wait()
+        async def stop_during_second_entry(song, source):
+            calls.append(song.video_id)
+            if len(calls) == 2:
+                await manager.disconnect(1)
+            return await enqueue(song, source)
 
-        monkeypatch.setattr(music_requests, "extract_song_info", extract)
-        task = asyncio.create_task(job.run())
-        job.task = task
-        player = manager.get_player(1)
-        player._request_tasks.add(task)
-        await asyncio.wait_for(player.voice_client.started.wait(), 1)
-        await manager.disconnect(1)
-        await task
+        job.enqueue = stop_during_second_entry
+        await job.run()
+        assert calls == ["first", "second"]
         assert not manager.get_queue(1)
         assert manager.get_current_song(1) is None
-        assert not player._request_tasks
         assert "cancelled" in job.message.edit.call_args.kwargs["content"]
 
     asyncio.run(scenario())
 
 
-def test_playlist_reports_unavailable_songs(job, manager, monkeypatch, song_factory):
+def test_playlist_reports_unavailable_songs(job, manager, monkeypatch):
     async def scenario():
         monkeypatch.setattr(
             music_requests,
             "extract_playlist",
-            AsyncMock(return_value=[{"video_id": "bad"}, {"video_id": "good"}]),
-        )
-        monkeypatch.setattr(
-            music_requests,
-            "extract_song_info",
-            AsyncMock(side_effect=[None, song_factory()]),
+            AsyncMock(
+                return_value=[
+                    {"video_id": "bad", "title": "[Private video]", "available": False},
+                    {"video_id": "good", "title": "Good"},
+                ]
+            ),
         )
         await job.import_playlist()
         assert job.added == 1
@@ -160,15 +154,44 @@ def test_playlist_reports_unavailable_songs(job, manager, monkeypatch, song_fact
     asyncio.run(scenario())
 
 
-def test_youtube_url_parsing_does_not_match_search_text():
-    assert not is_playlist_url("my list=songs")
-    assert not is_playlist_url("https://example.com/playlist?list=123")
-    assert is_playlist_url("https://music.youtube.com/watch?v=abcdefghijk&list=123")
-    assert (
-        single_video_url("https://youtu.be/abcdefghijk?list=123&t=2")
-        == "https://www.youtube.com/watch?v=abcdefghijk"
-    )
-    assert single_video_url("https://www.youtube.com/playlist?list=123") is None
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("my list=songs", False),
+        ("https://example.com/playlist?list=123", False),
+        ("https://evil.example/watch?v=abcdefghijk&list=123", False),
+        ("https://www.youtube.com.evil.example/playlist?list=123", False),
+        ("https://www.youtube.com/watch?v=abcdefghijk", False),
+        ("https://youtu.be/abcdefghijk", False),
+        ("https://music.youtube.com/watch?v=abcdefghijk&list=123", True),
+        ("https://www.youtube.com/playlist?list=PL123", True),
+        ("https://www.youtube.com/playlist", True),
+        ("https://m.youtube.com/watch?v=abcdefghijk&list=RD123", True),
+        ("https://youtu.be/abcdefghijk?list=123", True),
+        ("", False),
+    ],
+)
+def test_is_playlist_url(url, expected):
+    assert is_playlist_url(url) is expected
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://youtu.be/abcdefghijk?list=123&t=2", "https://www.youtube.com/watch?v=abcdefghijk"),
+        ("https://www.youtube.com/watch?v=abcdefghijk&list=1", "https://www.youtube.com/watch?v=abcdefghijk"),
+        ("https://music.youtube.com/watch?v=abcdefghijk", "https://www.youtube.com/watch?v=abcdefghijk"),
+        ("https://www.youtube.com/shorts/abcdefghijk", "https://www.youtube.com/watch?v=abcdefghijk"),
+        ("https://www.youtube.com/live/abcdefghijk?feature=share", "https://www.youtube.com/watch?v=abcdefghijk"),
+        ("https://www.youtube.com/playlist?list=123", None),
+        ("https://www.youtube.com/shorts/", None),
+        ("https://youtu.be/", None),
+        ("https://example.com/watch?v=abcdefghijk", None),
+        ("not a url", None),
+    ],
+)
+def test_single_video_url(url, expected):
+    assert single_video_url(url) == expected
 
 
 def test_play_request_connects_the_controls_and_starts_audio(

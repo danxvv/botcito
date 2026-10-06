@@ -19,9 +19,18 @@ class FakeSource:
         self.cleaned = True
 
 
+BOT_ID = 999
+
+
 class FakeVoice:
     def __init__(self, channel_id=10):
-        self.channel = SimpleNamespace(id=channel_id)
+        self.user = SimpleNamespace(id=BOT_ID)
+        self.members = {}
+        self.channel = SimpleNamespace(
+            id=channel_id,
+            voice_states={BOT_ID: object()},
+            guild=SimpleNamespace(get_member=self.members.get),
+        )
         self.connected = True
         self.playing = False
         self.paused = False
@@ -33,6 +42,15 @@ class FakeVoice:
     @property
     def loop(self):
         return asyncio.get_running_loop()
+
+    def set_listeners(self, *people, bots=()):
+        """Put these user IDs in the channel with the bot (`bots` are bot accounts)."""
+        self.channel.voice_states.clear()
+        self.channel.voice_states[BOT_ID] = object()
+        self.members.clear()
+        for user_id in (*people, *bots):
+            self.channel.voice_states[user_id] = object()
+            self.members[user_id] = SimpleNamespace(bot=user_id in bots)
 
     def is_connected(self):
         return self.connected

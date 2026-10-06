@@ -6,9 +6,17 @@ services:
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN:?Set DISCORD_TOKEN in .env before starting the bot}
       SYNC_COMMANDS: ${SYNC_COMMANDS:-1}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - bot-data:/app/data
     stop_grace_period: 30s
+    # The bot refreshes /app/data/heartbeat while it is connected to Discord.
+    healthcheck:
+      test: ["CMD", "python", "health.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 volumes:
   bot-data:

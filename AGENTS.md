@@ -30,7 +30,7 @@ uv run python main.py
 uv run audit
 
 # Quick syntax check
-uv run python -m compileall main.py commands audit audio_cache.py autoplay.py music_player.py ratings.py youtube.py
+uv run python -m compileall main.py commands audit audio_cache.py autoplay.py background.py health.py music_player.py ratings.py youtube.py
 ```
 
 ## Lint and Format
@@ -80,7 +80,9 @@ DISCORD_TOKEN=your_bot_token_here
 - `commands/queue_view.py`: paginated queue editing by stable song entry ID.
 - `commands/stats.py`: music stats, leaderboard, and song rating commands.
 - `music_player.py`: per-guild player state, queue logic, autoplay, voice connection handling.
-- `youtube.py`: async wrappers around blocking `yt-dlp` extraction.
+- `youtube.py`: async wrappers around blocking `yt-dlp` extraction, cancellation, and lazily resolved playlist entries.
+- `background.py`: `spawn()` for fire-and-forget tasks (keeps a reference and logs failures).
+- `health.py`: heartbeat file used by the compose healthcheck, and the yt-dlp age check.
 - `autoplay.py`: YouTube Music autocomplete and recommendation logic.
 - `ratings.py`: SQLite-backed song rating storage.
 - `audit/`: audit database + textual TUI viewer.
@@ -123,7 +125,8 @@ DISCORD_TOKEN=your_bot_token_here
 ### Async and Concurrency Patterns
 
 - Keep Discord and network/file operations async where possible.
-- Offload blocking work such as yt-dlp extraction via `run_in_executor`.
+- Offload blocking work such as yt-dlp extraction via `run_in_executor`; give it a cancellation flag so a timed-out thread stops (see `CancellableYDL`).
+- Start fire-and-forget tasks with `background.spawn()`, never a bare `asyncio.create_task()` whose result is dropped; the loop only holds weak references.
 - Protect shared mutable per-guild state with `asyncio.Lock`.
 - From sync callbacks such as voice `after`, schedule coroutines with `asyncio.run_coroutine_threadsafe`.
 
@@ -132,6 +135,8 @@ DISCORD_TOKEN=your_bot_token_here
 - Raise specific exceptions for validation/config failures.
 - Catch specific library exceptions where feasible (`DownloadError`, etc.).
 - Keep user-facing error messages concise and safe.
+- Log with the `logging` module (`logger = logging.getLogger(__name__)`), not `print`. `LOG_LEVEL` controls verbosity.
+- Never let user input reach yt-dlp's generic extractor (it is excluded in `youtube.py`); it would fetch arbitrary hosts.
 - Re-raise after logging when caller behavior depends on exception flow.
 
 ### Discord Bot Patterns
@@ -149,6 +154,9 @@ DISCORD_TOKEN=your_bot_token_here
 - Important DB files:
   - `data/audit.db`
   - `data/ratings.db`
+- `data/heartbeat` is refreshed while the bot is connected; the compose healthcheck reads it.
+- New top-level modules must be added to `pyproject.toml` (`py-modules`) and `.dockerignore`; `tests/test_packaging.py` enforces both.
+- yt-dlp is installed as `yt-dlp[default]` so the challenge solver ships with it instead of being downloaded at runtime. Dependabot proposes yt-dlp updates daily.
 
 ## Agent Workflow Recommendations
 

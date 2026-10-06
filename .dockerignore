@@ -8,6 +8,8 @@
 !main.py
 !audio_cache.py
 !autoplay.py
+!background.py
+!health.py
 !music_player.py
 !ratings.py
 !youtube.py

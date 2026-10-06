@@ -3,7 +3,13 @@
 import discord
 
 from music_player import player_manager
-from .helpers import MusicView, ensure_same_voice, format_duration, respond
+from .helpers import (
+    MusicView,
+    ensure_same_voice,
+    format_duration,
+    respond,
+    song_duration_label,
+)
 
 PAGE_SIZE = 10
 
@@ -44,7 +50,7 @@ class QueueView(MusicView):
             title = discord.utils.escape_markdown(song.title[:100])
             requester = discord.utils.escape_markdown(song.requested_by_name[:40])
             lines.append(
-                f"**{position}. {title}** · {format_duration(song.duration)}\n{requester} · {wait_label(self.guild_id, song.entry_id)}"
+                f"**{position}. {title}** · {song_duration_label(song)}\n{requester} · {wait_label(self.guild_id, song.entry_id)}"
             )
         embed.description = (
             "\n\n".join(lines) or "Queue is empty. Add a song with /play."
