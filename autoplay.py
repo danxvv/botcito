@@ -152,6 +152,16 @@ class YouTubeMusicHandler:
         self._played_videos_list.append(video_id)
         self._played_videos_set.add(video_id)
 
+    def forget_older(self, keep: int) -> int:
+        """Forget all but the `keep` most recently played videos so they can be recommended again.
+
+        Returns how many videos were forgotten.
+        """
+        forgotten = self._played_videos_list[: max(0, len(self._played_videos_list) - keep)]
+        del self._played_videos_list[: len(forgotten)]
+        self._played_videos_set.difference_update(forgotten)
+        return len(forgotten)
+
     def clear_history(self) -> None:
         """Clear the played videos history and recommendation cache."""
         self._played_videos_list.clear()

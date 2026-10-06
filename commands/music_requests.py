@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import re
 from time import monotonic
 
 import discord
@@ -14,6 +13,8 @@ from youtube import (
     extract_playlist,
     extract_song_info,
     is_playlist_url,
+    is_video_id,
+    playlist_entry_song,
     search_youtube,
     single_video_url,
 )
@@ -147,7 +148,7 @@ class MusicRequest:
         self.player_url = message.jump_url
 
     async def resolve_song(self, query: str) -> SongInfo | None:
-        if query.startswith("yt:") and re.fullmatch(r"[A-Za-z0-9_-]{11}", query[3:]):
+        if query.startswith("yt:") and is_video_id(query[3:]):
             return await extract_song_info(query[3:])
         if query.startswith(("https://", "http://")):
             return await extract_song_info(single_video_url(query) or query)
@@ -204,11 +205,11 @@ class MusicRequest:
             if len(self.player.queue) >= MAX_QUEUE_LENGTH:
                 self.remaining = len(entries) - index
                 break
-            song = await extract_song_info(entry["video_id"])
-            self.check_session()
-            if not song:
+            if not entry.get("available", True):
                 self.unavailable += 1
-            elif await self.enqueue(song, "playlist") < 0:
+            # Entries are queued as-is and extracted when they are about to play, so a long
+            # playlist costs one request now instead of one per song.
+            elif await self.enqueue(playlist_entry_song(entry), "playlist") < 0:
                 self.remaining = len(entries) - index
                 break
             else:

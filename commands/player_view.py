@@ -11,9 +11,9 @@ from ratings import get_rating_counts, rate_song
 from .helpers import (
     MusicView,
     ensure_same_voice,
-    format_duration,
     render_progress_bar,
     respond,
+    song_duration_label,
     _log_music_event,
 )
 from .queue_view import show_queue
@@ -193,7 +193,7 @@ async def render_player(guild_id: int) -> tuple[discord.Embed, PlayerView | None
                 inline=False,
             )
         else:
-            embed.add_field(name="Duration", value=format_duration(song.duration))
+            embed.add_field(name="Duration", value=song_duration_label(song))
         embed.add_field(
             name="Requested by",
             value=discord.utils.escape_markdown(song.requested_by_name[:80]),

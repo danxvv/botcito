@@ -1,0 +1,31 @@
+# YouTube changes often, and a stale yt-dlp is the most common reason playback breaks.
+# Check for new releases daily so the fix arrives as a pull request.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    groups:
+      # yt-dlp pins its matching yt-dlp-ejs solver, so they must update together.
+      yt-dlp:
+        patterns:
+          - "yt-dlp"
+          - "yt-dlp-ejs"
+      other-dependencies:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "yt-dlp"
+          - "yt-dlp-ejs"
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

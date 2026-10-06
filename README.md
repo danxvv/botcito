@@ -9,7 +9,7 @@ botcito is a Discord music bot you host yourself. Play songs and playlists from 
 ## What you can do
 
 - **Find a song quickly.** Search by name, choose a YouTube Music autocomplete suggestion, or paste a YouTube link.
-- **Bring a whole playlist.** Start listening while the remaining tracks load, with progress updates and a cancel button.
+- **Bring a whole playlist.** The queue fills instantly and music starts right away; each track is prepared as its turn comes, with progress updates and a cancel button.
 - **Share the controls.** Pause, skip, change volume, rate songs, and toggle autoplay from a player card that updates during the session.
 - **Make the queue your own.** Browse songs and requesters, move a track up next, remove entries, or shuffle the queue.
 - **Discover more music.** Autoplay recommends songs using recent plays and likes/dislikes.
@@ -63,7 +63,7 @@ Join a Discord voice channel, then type `/play` in a text channel and enter a so
 2. **Control playback:** use the shared player card for pause/resume, skip, volume, ratings, and autoplay. `/nowplaying` takes you back to it.
 3. **Arrange the queue:** run `/queue`, select a song, then choose **Play next**, **Move**, or **Remove**. Pages show who requested each song and an estimated wait when available.
 4. **Keep it going:** enable `/autoplay` for recommendations when your queue runs out. Like or dislike the current song to influence future recommendations.
-5. **Finish the session:** `/stop` cancels pending requests, clears the queue, and disconnects. The bot also leaves after five minutes of inactivity.
+5. **Finish the session:** `/stop` cancels pending requests, clears the queue, and disconnects. The bot also leaves after five minutes of inactivity, or one minute after the last person leaves its voice channel (even with autoplay on).
 
 Changed your mind? Use **Cancel request** while a search or playlist is loading, or **Cancel song** / `/skip` while a track is preparing. `/clearqueue` cancels pending imports and clears upcoming songs while the current track keeps playing.
 
@@ -82,6 +82,7 @@ In the tables below, `<...>` means required and `[...]` means optional. Discord 
 | `/pause` | Pause the current song |
 | `/resume` | Resume playback |
 | `/skip` | Skip the current song or cancel its preparation |
+| `/seek <position>` | Jump to a time in the current song: `1:30`, `90` (seconds), or `+30` / `-15` from now |
 | `/volume <percent>` | Set the volume from 0 to 100 |
 | `/stop` | Cancel requests, clear the queue, and disconnect |
 
@@ -139,6 +140,7 @@ Keep this process running while you use the bot. Press **Ctrl+C** to stop it.
 | --- | --- | --- |
 | `DISCORD_TOKEN` | Yes | The token from your application's **Bot** page |
 | `SYNC_COMMANDS` | No | Defaults to `1`; set to `0` to skip slash command synchronization on startup |
+| `LOG_LEVEL` | No | Defaults to `INFO`; use `DEBUG` to include yt-dlp's detailed extraction output |
 
 Run these commands from the project folder:
 
@@ -149,6 +151,9 @@ docker compose up -d --build
 
 # Follow logs
 docker compose logs -f bot
+
+# Check the container's health (the bot refreshes a heartbeat while connected to Discord)
+docker compose ps
 
 # Open the audit viewer in your terminal
 docker compose exec bot audit
@@ -167,7 +172,9 @@ Docker rebuilds and `docker compose down` preserve saved data. **`docker compose
 
 ### Playback details
 
-Cached audio plays locally. Otherwise, the bot waits up to three seconds for a download before falling back to streaming; searching and connecting may take additional time. It also downloads upcoming tracks in advance. Interrupted playback gets one retry from the beginning, then a visible skip notice if it fails again.
+Cached audio plays locally. Otherwise, the bot waits up to three seconds for a download before falling back to streaming; searching and connecting may take additional time. It also downloads upcoming tracks in advance. Interrupted playback gets one retry from where it stopped, then a visible skip notice if it fails again. Playlist tracks are looked up just before they are needed; a track that turns out to be private or removed is skipped with a notice. Autoplay avoids songs your server disliked, and songs that people keep skipping rank lower. If autoplay runs out of unplayed recommendations, it mixes earlier songs back in rather than stopping.
+
+Links to YouTube and to sites with their own yt-dlp support can be played. Links to arbitrary web pages or direct file URLs are rejected, so the bot cannot be pointed at addresses on your network.
 
 ## Troubleshooting
 
@@ -178,6 +185,7 @@ Cached audio plays locally. Otherwise, the bot waits up to three seconds for a d
 | The bot cannot join or speak | Join a voice channel and check its **Connect** and **Speak** permissions, including channel overrides. |
 | The player card cannot appear | Check **View Channels**, **Send Messages**, and **Embed Links** in the text channel. |
 | A song fails to play | Try another public YouTube video and check the logs. For local runs, verify FFmpeg and a supported JavaScript runtime are on your `PATH`. |
+| Many songs fail at once | YouTube changes often, and an old yt-dlp is the usual cause. The startup log warns when yt-dlp is more than 45 days old. Run `uv lock --upgrade-package yt-dlp`, then rebuild with `docker compose up -d --build` (or run `uv sync` locally). |
 | Controls belong to an old session | Run `/play` to start a session, then `/nowplaying` to open its player card. |
 
 Still stuck? [Open an issue](https://github.com/danxvv/botcito/issues) with what you tried, your setup (Docker or local), and relevant logs with tokens and private information removed.
@@ -197,13 +205,13 @@ Bug reports, documentation improvements, tests, and code contributions are welco
 ```bash
 # Run from the repository root
 uv run pytest tests/
-uv run python -m compileall main.py commands audit audio_cache.py autoplay.py music_player.py ratings.py youtube.py
+uv run python -m compileall main.py commands audit audio_cache.py autoplay.py background.py health.py music_player.py ratings.py youtube.py
 
 # Run just the playback tests while working on that area
 uv run pytest tests/test_playback.py -v
 ```
 
-The regression suite uses fake voice clients and mocked extraction, so tests need no Discord token, live Discord connection, or YouTube downloads. To try the bot itself, follow [Run locally](#run-locally) with your own bot and test server. Keep `.env`, `cookies.txt`, and runtime data out of commits.
+The regression suite uses fake voice clients and mocked extraction, so tests need no Discord token, live Discord connection, or YouTube downloads. GitHub Actions runs it on Python 3.10 and 3.13 and checks that the Docker image builds. When you add a top-level module, list it in `pyproject.toml` (`py-modules`) and `.dockerignore`; `tests/test_packaging.py` fails if either is missing. To try the bot itself, follow [Run locally](#run-locally) with your own bot and test server. Keep `.env`, `cookies.txt`, and runtime data out of commits.
 
 ### Find your way around
 
@@ -216,6 +224,8 @@ The regression suite uses fake voice clients and mocked extraction, so tests nee
 | `commands/stats.py` | Stats, leaderboard, and song ratings |
 | `music_player.py` | Per-server state, playback, autoplay, and voice connections |
 | `youtube.py`, `audio_cache.py` | YouTube extraction and audio caching |
+| `background.py` | Fire-and-forget tasks that stay referenced and log failures |
+| `health.py` | Heartbeat file for the container health check, and the yt-dlp age check |
 | `autoplay.py`, `ratings.py` | Recommendations and saved ratings |
 | `audit/` | Event logging, database, and terminal viewer |
 | `tests/` | Offline regression tests |

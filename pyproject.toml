@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "discord.py[voice]>=2.7.1,<3.0.0",
-    "yt-dlp>=2026.8.19",
+    "yt-dlp[default]>=2026.8.19",
     "ytmusicapi>=1.12.2,<2.0.0",
     "python-dotenv>=1.2.3,<2.0.0",
     "textual>=8.2.8",
@@ -32,7 +32,7 @@ dev = [
 include = ["audit*", "commands*"]
 
 [tool.setuptools]
-py-modules = ["audio_cache", "autoplay", "main", "music_player", "ratings", "youtube"]
+py-modules = ["audio_cache", "autoplay", "background", "health", "main", "music_player", "ratings", "youtube"]
 
 [tool.setuptools.package-data]
 audit = ["styles.tcss"]

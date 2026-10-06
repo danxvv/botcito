@@ -2,6 +2,7 @@
 
 import asyncio
 import atexit
+import copy
 import logging
 import shutil
 from concurrent.futures import ThreadPoolExecutor
@@ -9,10 +10,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
 
-import yt_dlp
-from yt_dlp.utils import DownloadError
+from yt_dlp.utils import DownloadCancelled, DownloadError
 
-from youtube import SongInfo, _get_options
+from youtube import SongInfo, CancellableYDL, _get_options, ensure_resolved
 
 logger = logging.getLogger(__name__)
 CACHE_DIR = Path(__file__).parent / "data" / "audio_cache"
@@ -81,8 +81,8 @@ class AudioCache:
                 }
             )
             try:
-                with yt_dlp.YoutubeDL(options) as ydl:
-                    info = ydl.extract_info(song.webpage_url, download=True)
+                with CancellableYDL(options, cancelled) as ydl:
+                    info = self._download_info(ydl, song, cancelled)
                     if not info or cancelled.is_set():
                         return None
                     path = Path(info.get("filepath") or ydl.prepare_filename(info))
@@ -91,12 +91,37 @@ class AudioCache:
                 destination = self.cache_dir / f"{Path(directory).name}{path.suffix}"
                 path.replace(destination)
                 return destination
-            except (DownloadError, OSError):
+            except (DownloadCancelled, DownloadError, OSError):
                 if not cancelled.is_set():
                     logger.exception("Audio download failed for %s", song.video_id)
                 return None
 
+    @staticmethod
+    def _download_info(ydl: CancellableYDL, song: SongInfo, cancelled: Event) -> dict | None:
+        """Download using the song's recent extraction, extracting again only if that fails."""
+        reusable = song.fresh_info()
+        if reusable is not None:
+            try:
+                return ydl.process_ie_result(copy.deepcopy(reusable), download=True)
+            except DownloadCancelled:
+                raise
+            except Exception:
+                if cancelled.is_set():
+                    raise
+                logger.debug(
+                    "Could not reuse extraction for %s; extracting again",
+                    song.video_id,
+                    exc_info=True,
+                )
+        return ydl.extract_info(song.webpage_url, download=True)
+
     async def _download(self, song: SongInfo, cancelled: Event) -> None:
+        # Lazily imported songs are extracted once here; the download reuses that result.
+        if not await ensure_resolved(song):
+            logger.warning("Could not prepare %s for download", song.video_id)
+            return
+        if song.is_live or cancelled.is_set():
+            return
         future = asyncio.get_running_loop().run_in_executor(
             _download_executor, self._download_sync, song, cancelled
         )
